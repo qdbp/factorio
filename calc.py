@@ -48,7 +48,6 @@ Modules = name_map_items([
 
 
 class Belt(Enum):
-    HY = F('7.5')
     Y = F('15')
     R = F('30')
     B = F('45')

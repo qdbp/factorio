@@ -36,10 +36,9 @@ var z{i in I, j in J, k in K, l in L}, binary;
     is transporting goods of type l
 */
 
-minimize complexity:
+minimize cost_overflow:
       sum{i in I, j in J, k in K, l in L} cost[j] * z[i,j,k,l]
     + sum{i in I, j in J, k in K, l in L} z[i,j,k,l] * flow[j];
-    /* + sum{i in I, j in J, k in K} z[i, j, k, "nothing"] */
 /* belt overflow and construction costs */
 
 s.t. satisfaction{l in L}:
@@ -47,10 +46,10 @@ s.t. satisfaction{l in L}:
         i in I,
         j in J,
         k in K
-    } z[i,j,k,l] * flow[j] >= need[l];
+    } (z[i,j,k,l] * flow[j]) >= need[l];
 /* ENOUGH ITEMS */
 
-s.t. homotrans{
+/* s.t. homotrans{
         i in I,
         j in J,
         k in K
@@ -61,7 +60,7 @@ s.t. homotrans{
     z[i,j,k,l] <= 1;
 /* HOMOGENEOUS TRANSPORT */
 
-s.t. sideshaveonetype{
+s.t. homosideshomotrans{
         i in I,
         k in K
     }:
@@ -69,7 +68,7 @@ s.t. sideshaveonetype{
         j in J,
         l in L
     } z[i,j,k,l] <= 1;
-/* SIDES HAVE ONE TYPE */
+/* SIDES HAVE ONE TYPE -> HOMOGENEOUS TRANSPORT */
 
 s.t. matchedsides{
         i in I,
@@ -114,6 +113,7 @@ param cost :=
 
 set L := nothing iron copper plastic;
 
+/* we need the "empty item" to handle some belt constraints */
 param need :=
     nothing 0
     iron 3
