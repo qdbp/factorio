@@ -199,7 +199,6 @@ class BaseManuf:
 
         for ing in in_rates:
             belts = Belt.from_rate(ing[0])
-            print(belts)
 
         print(
             f'Producing {self.item} in ({self.name})['
