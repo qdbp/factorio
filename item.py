@@ -222,6 +222,7 @@ class Recipe:
         Centrifuging = 'centrifuging'
         Smelting = 'smelting'
         Chemistry = 'chemistry'
+        RocketBuilding = 'rocket-building'
 
     class Version(Enum):
         Expensive = 'expensive'
@@ -239,7 +240,16 @@ class Recipe:
 
     @classmethod
     def by_name(cls, s: str) -> Recipe:
-        return cls.__recipes[Item.renormalize_name(s)]
+        s = Item.renormalize_name(s)
+        try:
+            return cls.__recipes[s]
+        except KeyError:
+            print(f'Could not find recipe for s. Partial matches:')
+            for word in s.split('_'):
+                for key, recipe in cls.__recipes.items():
+                    if word in key:
+                        print(key, ':', recipe)
+            raise
 
     @classmethod
     def initialize(cls, which: Version = Version.Expensive):
@@ -323,6 +333,13 @@ class Recipe:
                     if raw_recipe.get('category') in ['oil-processing']:
                         continue
 
+                    raw_name = raw_recipe.get('name', raw_recipe.get('result'))
+                    name = Item.renormalize_name(raw_name)
+                    proddable = raw_name in get_proddable_items()
+                    category = Recipe.Category(
+                        raw_recipe.get('category', 'crafting')
+                    )
+
                     if 'expensive' in raw_recipe:
                         try:
                             raw_recipe = raw_recipe[which.value]
@@ -340,13 +357,6 @@ class Recipe:
                     if results is None:
                         continue
 
-                    raw_name = raw_recipe.get('name', raw_recipe.get('result'))
-                    name = Item.renormalize_name(raw_name)
-                    proddable = raw_name in get_proddable_items()
-
-                    category = Recipe.Category(
-                        raw_recipe.get('category', 'crafting')
-                    )
                     time = safe_frac(raw_recipe.get('energy_required', '0.5'))
 
                     # XXX ignore fluid ingredients

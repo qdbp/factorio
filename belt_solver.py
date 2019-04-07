@@ -65,6 +65,10 @@ class Belt(Enum):
         }[self]
 
 
+def strinsert(base: str, val: str, ix: int) -> str:
+    return base[:ix] + val + base[ix:]
+
+
 @dataclass(frozen=True)
 class BeltAssignment:
     class Infeasible(Exception):
@@ -145,6 +149,27 @@ class BeltAssignment:
 
             out.extend(list(assts_copy))
         return sorted(out)
+
+    # TODO this supports only the base symmetric two-line layout
+    @staticmethod
+    def generate_layout_str(assignments: ty.List[BeltAssignment]
+                            ) -> ty.Tuple[str, str]:
+        n_lines = len(set(asst.line for asst in assignments))
+
+        top_half = '^   '
+        bot_half = '0 X '
+
+        if n_lines > 1:
+            top_half = '^' + top_half
+            bot_half = strinsert(bot_half, '1', 1)
+        if n_lines > 2:
+            top_half += '^'
+            bot_half += '3'
+
+        return (
+            top_half + 'v' + ''.join(reversed(top_half)),
+            bot_half + 'P' + ''.join(reversed(bot_half))
+        )
 
     def __lt__(self, other):
         return (self.line, self.pos,

@@ -77,6 +77,7 @@ class BaseManuf:
         return dc_replace(self, modules=modules)
 
     def with_recipe(self, recipe: Recipe) -> BaseManuf:
+        print(recipe)
         if self.modules and any(m.prod != Frac(0) for m in self.modules
                                 ) and not recipe.proddable:
             raise ValueError(
@@ -144,7 +145,10 @@ class BaseManuf:
             return
 
         # TODO support different layouts
-        print('Solution/Layout:\n' '\t^^   ^v^   ^^\n' '\t01 M 2P2 M 10')
+        print(
+            'Solution/Layout:\n\t'
+            + '\n\t'.join(BeltAssignment.generate_layout_str(assignment))
+        )
         print(
             f'Solution/Input: supply:\n\t'
             + '\n\t'.join(f'{inflow} per second' for inflow in need_flows)
@@ -233,7 +237,10 @@ def main():
         '--manuf', default='assembler3', help='manufactory to use for recipe'
     )
     parser.add_argument(
-        '--modules', default='p3,p3,p3,p3', help='list of modules to use'
+        '--modules',
+        default='p3,p3,p3,p3',
+        help='list of modules to use. '
+        'comma separated, count prefixed; e.g "e2,s2", "s3,3p3"'
     )
     parser.add_argument(
         '--recipe-version',
@@ -244,7 +251,19 @@ def main():
     args = parser.parse_args(sys.argv[1:])
 
     Recipe.initialize(which=Recipe.Version(args.recipe_version))
-    modules = [Item.Module.by_name(mod) for mod in args.modules.split(',')]
+    recipe = Recipe.by_name(args.recipe)
+
+    modules = []
+    raw_modules = args.modules.split(',')
+    for rawmod in raw_modules:
+        if rawmod[0] in '123456789':
+            mod = Item.Module.by_name(rawmod[1:])
+            count = int(rawmod[0])
+        else:
+            mod = Item.Module.by_name(rawmod)
+            count = 1
+        modules.extend(count * [mod])
+
     manuf = Manuf.by_name(args.manuf).value
 
     try:
@@ -259,9 +278,7 @@ def main():
     elif num_output <= 0:
         raise ValueError('Output must be positive!')
 
-    prod_manuf = (
-        manuf.with_recipe(Recipe.by_name(args.recipe)).with_modules(modules)
-    )
+    prod_manuf = manuf.with_recipe(recipe).with_modules(modules)
 
     print('Info/Params: optimizing with parameters:')
     pprint(vars(args))
