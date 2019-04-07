@@ -127,11 +127,6 @@ class BeltAssignment:
                                 new_x = dc_replace(x, item_right=y.item_right)
                                 new_y = dc_replace(y, item_right=x.item_right)
 
-                            # print(
-                            #     f'Normalized lines:'
-                            #     f'\n-- {x}\n-- {y}\n\n++ {new_x}\n++ {new_y}'
-                            # )
-
                             # we invalidate the originals
                             assts_copy.discard(x)
                             assts_copy.discard(y)
@@ -161,8 +156,8 @@ class BeltAssignment:
 
     def __str__(self) -> str:
         return (
-            f'LINE {self.line} / POS {self.pos.value} / '
-            f'{self.belt.name[:3].upper()} : '
+            f'{self.line}:{self.pos.value}'
+            f'[{self.belt.name[:3].upper()}] = '
             f'{self.item_left} | {self.item_right}'
         )
 
@@ -248,8 +243,6 @@ def solve_belts(
             product(s_Line, s_Position, s_BeltType, s_side, s_Item)
         )
         # normalization costs
-        # XXX these balloon solution time!
-        # TODO do post-solution renormalization instead
         # line
         + pp.lpSum(
             Z[l][p][t][s][i] * norm_line_cost[l] for l, p, t, s, i in

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import typing as t
+from pprint import pprint
 from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
@@ -11,8 +12,6 @@ from math import ceil
 
 from belt_solver import Belt, BeltAssignment, solve_belts
 from item import Item, Recipe
-
-T = t.TypeVar('T')
 
 
 @dataclass(frozen=True)
@@ -121,7 +120,7 @@ class BaseManuf:
     def solve_report(self, outflow: Frac, **solver_kwargs):
 
         print(
-            f'Info/Producing: {self.recipe}\n'
+            f'Info/Recipe: {self.recipe}\n'
             f'Info/Manuf: ({self.name})['
             + ','.join(m.name for m in self.modules) + ']' + '<' + ' '.join([
                 f'{attr}={sum(getattr(m, attr) for m in self.modules)}'
@@ -145,7 +144,7 @@ class BaseManuf:
             return
 
         # TODO support different layouts
-        print('Solution/Layout:\n' '\t^^   ^v^   ^^\n' '\t12 X 3O3 X 21')
+        print('Solution/Layout:\n' '\t^^   ^v^   ^^\n' '\t01 M 2P2 M 10')
         print(
             f'Solution/Input: supply:\n\t'
             + '\n\t'.join(f'{inflow} per second' for inflow in need_flows)
@@ -264,16 +263,11 @@ def main():
         manuf.with_recipe(Recipe.by_name(args.recipe)).with_modules(modules)
     )
 
+    print('Info/Params: optimizing with parameters:')
+    pprint(vars(args))
+
     prod_manuf.solve_report(num_output)
 
 
 if __name__ == '__main__':
     main()
-    # Recipe.initialize()
-    # manuf = (
-    #     Manuf.Assembler3.value.with_modules(
-    #         4 * [Item.Module.by_name('p3')]
-    #     ).with_recipe(Recipe.by_name('advanced-circuit'))
-    # )
-
-    # manuf.solve_report(Belt.R)

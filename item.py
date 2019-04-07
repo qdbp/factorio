@@ -60,7 +60,7 @@ def read_lua_table(fn: Path) -> t.Generator[t.List[t.Any], None, None]:
     while body.find(extend_str) >= 0:
         data_start_ix = body.find(extend_str) + len(extend_str)
         close_ix = _find_matching_paren(body[data_start_ix:]) + data_start_ix
-        yield slpp.slpp.decode(body[data_start_ix:close_ix])  # type: ignore
+        yield slpp.slpp.decode(body[data_start_ix:close_ix])
         body = body[close_ix:]
 
 
@@ -257,8 +257,9 @@ class Recipe:
             This function is a disgusting monster. Handle it lovingly but with
             gloves.  '''
 
+            # this is a "simple" recipe
             if 'result' in raw:
-                out = [
+                return [
                     Recipe.Outcome.pure([
                         Item.Flow(
                             raw.get('result_count', 1),
@@ -266,56 +267,52 @@ class Recipe:
                         )
                     ])
                 ]
+
+            raw_results = raw['results']
+            assert isinstance(raw_results, list)
+
+            # XXX dump fluid producing recipes
+            if any(isinstance(x, dict) and x.get('type') == 'fluid'
+                   for x in raw_results):
+                return None
+
+            # XXX either all instances have a probability or none do
+            all_prob = all(
+                isinstance(x, dict) and 'probability' in x for x in raw_results
+            )
+            no_prob = not any(
+                isinstance(x, dict) and 'probability' in x for x in raw_results
+            )
+
+            if all_prob:
+                return [
+                    Recipe.Outcome(
+                        prob=safe_frac(prod['probability']),
+                        flows=[
+                            Item.Flow(
+                                num=prod['amount'],
+                                item=Item.by_name(prod['name']),
+                            )
+                        ]
+                    ) for prod in raw_results
+                ]
+            elif no_prob:
+                return [
+                    Recipe.Outcome(
+                        prob=Frac(1),
+                        flows=[
+                            (Item.Flow(item=Item.by_name(res[0]), num=res[1]))
+                            if isinstance(res, list) else (
+                                Item.Flow(
+                                    item=Item.by_name(res['name']),
+                                    num=res.get('amount', 1)
+                                )
+                            ) for res in raw_results
+                        ]
+                    )
+                ]
             else:
-                raw_results = raw['results']
-                assert isinstance(raw_results, list)
-
-                # XXX dump fluid producing recipes
-                if any(isinstance(x, dict) and x.get('type') == 'fluid'
-                       for x in raw_results):
-                    return None
-
-                # XXX either all instances have a probability or none do
-                all_prob = all(
-                    isinstance(x, dict) and 'probability' in x
-                    for x in raw_results
-                )
-                no_prob = not any(
-                    isinstance(x, dict) and 'probability' in x
-                    for x in raw_results
-                )
-
-                if all_prob:
-                    out = []
-                    for product in raw_results:
-                        prob = safe_frac(product['probability'])
-                        flow = Item.Flow(
-                            num=product['amount'],
-                            item=Item.by_name(product['name']),
-                        )
-                        out.append(Recipe.Outcome(prob, [flow]))
-                elif no_prob:
-                    flows = []
-                    for result in raw_results:
-                        if isinstance(result, list):
-                            flows.append(
-                                Item.Flow(
-                                    item=Item.by_name(result[0]),
-                                    num=result[1]
-                                )
-                            )
-                        elif isinstance(result, dict):
-                            flows.append(
-                                Item.Flow(
-                                    item=Item.by_name(result['name']),
-                                    num=result.get('amount', 1),
-                                )
-                            )
-                    out = [Recipe.Outcome(Frac(1), flows)]
-                else:
-                    raise NotImplementedError('Mixed probability recipes!')
-
-            return out
+                raise NotImplementedError('Mixed probability recipes!')
 
         for fn in FACTORIO_RECIPES_DIR.glob('*.lua'):
             for raw_recipes in read_lua_table(fn):
@@ -416,8 +413,3 @@ class Recipe:
             out += str(self.outcomes)
 
         return out
-
-
-if __name__ == '__main__':
-    Recipe.initialize(Recipe.Version.Expensive)
-    # pprint(items)
