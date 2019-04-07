@@ -1,119 +1,18 @@
 from __future__ import annotations
 
+import sys
 import typing as t
-from collections import Counter
+from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from enum import Enum
-from fractions import Fraction as F
+from fractions import Fraction as Frac
 from math import ceil
 
-
-class attrdict(dict):
-    def __getattr__(self, key):
-        return self[key]
-
+from belt_solver import Belt, BeltAssignment, solve_belts
+from item import Item, Recipe
 
 T = t.TypeVar('T')
-
-
-def name_map_items(items: t.Iterable) -> attrdict:
-    return attrdict({
-        item.name.replace('-', '_').upper(): item
-        for item in items
-    })
-
-
-@dataclass(frozen=True)
-class Module:
-
-    name: str
-    speed_gain: F = F('0')
-    power_gain: F = F('0')
-    prod_gain: F = F('0')
-    poll_gain: F = F('0')
-
-
-Modules = name_map_items([
-    Module('P3', F('-0.15'), F('0.8'), F('0.10'), F('0.10')),
-    Module('P2', F('-0.15'), F('0.6'), F('0.06'), F('0.07')),
-    Module('P1', F('-0.15'), F('0.4'), F('0.04'), F('0.05')),
-    Module('S3', F('0.5'), F('0.7')),
-    Module('S2', F('0.3'), F('0.6')),
-    Module('S1', F('0.2'), F('0.5')),
-    Module('E3', power_gain=F('-0.5')),
-    Module('E2', power_gain=F('-0.4')),
-    Module('E1', power_gain=F('-0.5')),
-])
-
-
-class Belt(Enum):
-    Y = F('15')
-    R = F('30')
-    B = F('45')
-
-    def __str__(self):
-        return {
-            self.Y: 'yellow belt',
-            self.R: 'red belt',
-            self.B: 'blue belt',
-        }[self]
-
-    def shortname(self) -> str:
-        return {  # type: ignore
-            self.Y: 'Y',
-            self.R: 'R',
-            self.B: 'B',
-        }[self]
-
-    @classmethod
-    def from_rate(cls, rate: F):
-        out: t.Counter[Belt] = Counter()
-        while rate > 0:
-            for belt in sorted(cls, key=lambda x: -x.value):  # type: ignore
-                if rate >= belt.value:
-                    out[belt] += 1
-                    rate -= belt.value
-                    break
-            else:
-                out[cls.Y] += 1
-                rate -= rate
-        return out
-
-    @classmethod
-    def pack_inflows(
-        cls, inflows: t.List[t.Tuple[F, Item]], constraint: t.Counter[Belt]
-    ):
-
-        # not enough belt halves, straight up
-        if len(inflows) > sum(constraint.values()) * 2:
-            raise ValueError('Too many inflows!')
-
-
-@dataclass(frozen=True)
-class Item:
-    name: str
-    recipe: t.Optional[Recipe]
-    is_fluid: bool = False
-    is_final: bool = False
-
-    @property
-    def solid_inputs_per_item(self) -> t.List[t.Tuple[F, Item]]:
-        if self.recipe is None:
-            return []
-        else:
-            return [(F(ingr[0]) / F(self.recipe.amount), ingr[1])
-                    for ingr in self.recipe.inputs]
-
-    def __str__(self):
-        return self.name
-
-
-@dataclass(frozen=True)
-class Recipe:
-    amount: int
-    time: F
-    inputs: t.List[t.Tuple[int, Item]]
 
 
 @dataclass(frozen=True)
@@ -125,131 +24,256 @@ class BaseManuf:
     '''
 
     name: str
-    base_speed: F
-    base_power: F
-    base_poll: F
+    base_speed: Frac
+    base_power: Frac
+    base_poll: Frac
     module_slots: int
-    modules: t.List[Module] = field(default_factory=list)
-    item: t.Optional[Item] = None
+    recipe_cap: t.FrozenSet[Recipe.Category]
+
+    modules: t.List[Item.Module] = field(default_factory=list)
+    recipe: t.Optional[Recipe] = None
 
     @property
-    def speed(self) -> F:
-        return F(
+    def speed(self) -> Frac:
+        return Frac(
             self.base_speed
-            + sum(self.base_speed * m.speed_gain for m in self.modules)
+            + sum(self.base_speed * m.speed for m in self.modules)
         )
 
     @property
-    def prod(self) -> F:
-        return F(F(1) + sum(F(m.prod_gain) for m in self.modules))
+    def prod(self) -> Frac:
+        return Frac(Frac(1) + sum(Frac(m.prod) for m in self.modules))
 
     @property
-    def power(self) -> F:
-        power = self.base_power * sum(m.power_gain for m in self.modules)
-        return F(max(self.base_power * F('0.2'), power))
+    def power(self) -> Frac:
+        power = self.base_power * sum(m.power for m in self.modules)
+        return Frac(max(self.base_power * Frac('0.2'), power))
 
     @property
-    def base_cpsu(self) -> F:
+    def base_rps(self) -> Frac:
         '''
-        Base cycles per second.
+        Base recipes per second.
         '''
-        if self.item is None:
-            raise ValueError('Must set produced item first!')
+        if self.recipe is None:
+            raise ValueError('Must set produced recipe first!')
         # XXX generalize check when recipe types are discriminated
-        if self.item.recipe is None:
-            raise ValueError('Recipe incompatible with this manufactory')
 
-        return F(F(self.item.recipe.amount) / F(self.item.recipe.time))
+        if not self.recipe.is_simple:
+            raise NotImplementedError(
+                'Only simple recipes are supported for now'
+            )
 
-    def with_modules(self, modules: t.List[Module]) -> BaseManuf:
+        return Frac(self.recipe.simple_prod.num / self.recipe.time)
+
+    def with_modules(self, modules: t.List[Item.Module]) -> BaseManuf:
         if len(modules) > self.module_slots:
             raise ValueError(
                 f'Too many modules for a {self.name} manufactory!'
             )
-
+        if self.recipe and any(m.prod != Frac(0)
+                               for m in modules) and not self.recipe.proddable:
+            raise ValueError(
+                'Assigning productivity modules to non-proddable recipe!'
+            )
         return dc_replace(self, modules=modules)
 
-    def with_producing(self, item: Item) -> BaseManuf:
-        return dc_replace(self, item=item)
+    def with_recipe(self, recipe: Recipe) -> BaseManuf:
+        if self.modules and any(m.prod != Frac(0) for m in self.modules
+                                ) and not recipe.proddable:
+            raise ValueError(
+                'Assigning non-proddable recipe to manuf. with prodmods!'
+            )
+        if recipe.category not in self.recipe_cap:
+            raise ValueError(
+                f'Recipe ({recipe.category})incompatible with '
+                f'this manufactory ({self.recipe_cap}'
+            )
+        return dc_replace(self, recipe=recipe)
 
-    def solve_rates(self, belt: Belt) -> t.Tuple[t.List[t.Tuple[F, Item]], F]:
+    def solve_rates(
+            self, outflow: Frac, **solver_kwargs
+    ) -> t.Tuple[t.List[BeltAssignment], int, t.List[Item.Flow]]:
         '''
         Solves the number of units to fill a full belt
         '''
-        # TODO include inputs
-        out_rate = F(belt.value)
+
+        # NOTE we divide by 2 since the line solution is for half the flow
+        # see: symmetric layout assumed (TODO) by belt_solver
+        out_rate = outflow / 2
+
         # base output per sec per unit
-        cpsu = F(self.speed) * self.base_cpsu
-        need_mfs = F(out_rate / cpsu) / self.prod
+        rps = Frac(self.speed) * self.base_rps
 
-        assert self.item is not None
-        need_inputs = [(need_mfs * cpsu * x[0], x[1])
-                       for x in self.item.solid_inputs_per_item]
+        # NOTE this is the needed manufactories per side
+        need_mfs = Frac(out_rate / rps) / self.prod
 
-        return need_inputs, need_mfs
+        assert self.recipe is not None
 
-    def solve_report(self, belt: Belt, target='output'):
-        if target == 'output':
-            in_rates, need_mfs = self.solve_rates(belt)
-        else:
-            raise NotImplementedError
+        need_flows = [
+            dc_replace(base_flow, num=base_flow.num * need_mfs * rps)
+            for base_flow in self.recipe.inputs
+        ]
 
-        total_power = self.power * need_mfs
+        belt_assignment = solve_belts(need_flows)
 
-        for ing in in_rates:
-            belts = Belt.from_rate(ing[0])
+        return belt_assignment, need_mfs, need_flows
+
+    def solve_report(self, outflow: Frac, **solver_kwargs):
 
         print(
-            f'Producing {self.item} in ({self.name})['
-            + ','.join(m.name for m in self.modules) + ']\n'
-            f'speed: {self.speed} '
-            f'(ops = {self.prod * self.speed * self.base_cpsu}); '
-            f'power: {self.power} prod: {self.prod}\n'
-            f'Target: {target} of one {belt};\n\n'
-            f'Output: you need {need_mfs} manufactories '
-            f'({round(float(total_power / 1000), 3)} MW);\n'
-            f'Output: rounded, this makes lines of {ceil(need_mfs)};\n'
-            f'Input: you need to supply:\n\t'
-            + '\n\t'.join(f'{x[0]} {x[1].name} per second' for x in in_rates)
+            f'Info/Producing: {self.recipe}\n'
+            f'Info/Manuf: ({self.name})['
+            + ','.join(m.name for m in self.modules) + ']' + '<' + ' '.join([
+                f'{attr}={sum(getattr(m, attr) for m in self.modules)}'
+                for attr in ['prod', 'speed', 'poll', 'power']
+            ]) + '>'
+        )
+        print(
+            f'Info/Manuf: speed: {self.speed} '
+            f'(rps = {self.prod * self.speed * self.base_rps}); '
+            f'power: {self.power} kW; prod: {self.prod}'
+        )
+        print(f'Info/Target: output of {outflow}/s')
+
+        try:
+            assignment, need_mfs, need_flows = self.solve_rates(
+                outflow, **solver_kwargs
+            )
+            total_power = self.power * need_mfs
+        except BeltAssignment.Infeasible:
+            print('No feasible solution!')
+            return
+
+        # TODO support different layouts
+        print('Solution/Layout:\n' '\t^^   ^v^   ^^\n' '\t12 X 3O3 X 21')
+        print(
+            f'Solution/Input: supply:\n\t'
+            + '\n\t'.join(f'{inflow} per second' for inflow in need_flows)
+        )
+        # XXX depends on layout
+        print(
+            f'Solution/ManufCount: 2 x {ceil(need_mfs/2)} '
+            f'({need_mfs}) manufactories'
+        )
+        print(f'Solution/Power: {round(float(total_power / 1000), 3)} MW')
+        print(
+            'Solution/Belts:\n\t' + '\n\t'.join(map(str, sorted(assignment)))
         )
 
 
-class Manuf:
-    A1 = BaseManuf('Assembler 1', F('0.5'), F('75'), F('4'), 0)
-    A2 = BaseManuf('Assembler 2', F('0.75'), F('150'), F('3'), 2)
-    A3 = BaseManuf('Assembler 3', F('1.25'), F('375'), F('2'), 4)
-    C = BaseManuf('Chemical plant', F('1'), F('210'), F('4'), 3)
-    R = BaseManuf('Refinery', F('1'), F('420'), F('6'), 3)
-    S = BaseManuf('Electric Furnace', F('2'), F('180'), F('1'), 2)
-
-
-# TODO autofill from game data
-Items = name_map_items([
-    Item('copper-ore', None),
-    Item('copper-cable', None),
-    Item('plastic-bar', None),
-    Item('electronic-circuit', None),
-])
-Items.update(
-    name_map_items([
-        Item('copper-plate', Recipe(1, F(32, 10), [(1, Items.COPPER_ORE)])),
-        Item(
-            'advanced-circuit',
-            Recipe(
-                1, F(6), [
-                    (8, Items.COPPER_CABLE),
-                    (4, Items.PLASTIC_BAR),
-                    (2, Items.ELECTRONIC_CIRCUIT),
-                ]
-            )
-        ),
-    ])
-)
-
-if __name__ == '__main__':
-    manuf = (
-        Manuf.A3.with_modules(4 * [Modules.P3]
-                              ).with_producing(Items.ADVANCED_CIRCUIT)
+class Manuf(Enum):
+    Assembler1 = BaseManuf(
+        'Assembler 1', Frac('0.5'), Frac('75'), Frac('4'), 0,
+        frozenset([Recipe.Category.Crafting])
+    )
+    Assembler2 = BaseManuf(
+        'Assembler 2', Frac('0.75'), Frac('150'), Frac('3'), 2,
+        frozenset([
+            Recipe.Category.Crafting,
+            Recipe.Category.CraftingWithFluid,
+            Recipe.Category.AdvancedCrafting,
+        ])
+    )
+    Assembler3 = BaseManuf(
+        'Assembler 3', Frac('1.25'), Frac('375'), Frac('2'), 4,
+        frozenset([
+            Recipe.Category.Crafting,
+            Recipe.Category.CraftingWithFluid,
+            Recipe.Category.AdvancedCrafting,
+        ])
+    )
+    Chemplant = BaseManuf(
+        'Chemical plant', Frac('1'), Frac('210'), Frac('4'), 3,
+        frozenset([Recipe.Category.Chemistry])
+    )
+    # TODO we do not currently handle fluids
+    Refinery = BaseManuf(
+        'Refinery', Frac('1'), Frac('420'), Frac('6'), 3, frozenset()
+    )
+    Smelter = BaseManuf(
+        'Electric Furnace', Frac('2'), Frac('180'), Frac('1'), 2,
+        frozenset([Recipe.Category.Smelting])
+    )
+    Centrifuge = BaseManuf(
+        'Centrifuge', Frac('1'), Frac('350'), Frac('4'), 2,
+        frozenset([Recipe.Category.Centrifuging])
     )
 
-    manuf.solve_report(Belt.Y, 'output')
+    @classmethod
+    def by_name(cls, s: str) -> Manuf:
+        s = s.lower()
+        if s.startswith('a'):
+            return {
+                '1': cls.Assembler1,
+                '2': cls.Assembler2,
+                '3': cls.Assembler3,
+            }[s[-1]]
+        elif s.startswith('s'):
+            return cls.Smelter
+        elif s.startswith('r'):
+            return cls.Refinery
+        elif s.startswith('ce'):
+            return cls.Centrifuge
+        elif s.startswith('ch'):
+            return cls.Chemplant
+        else:
+            raise ValueError(f'Manufactory type "s" not understood')
+
+
+def main():
+
+    parser = ArgumentParser()
+    parser.add_argument(
+        'recipe',
+        help='name of the recipe to use, as it appears in the factorio files'
+    )
+    parser.add_argument(
+        'output', help='how much output is required. Number or belt.'
+    )
+    parser.add_argument(
+        '--manuf', default='assembler3', help='manufactory to use for recipe'
+    )
+    parser.add_argument(
+        '--modules', default='p3,p3,p3,p3', help='list of modules to use'
+    )
+    parser.add_argument(
+        '--recipe-version',
+        default='expensive',
+        help='which recipe costs to use. "normal" or "expensive"'
+    )
+
+    args = parser.parse_args(sys.argv[1:])
+
+    Recipe.initialize(which=Recipe.Version(args.recipe_version))
+    modules = [Item.Module.by_name(mod) for mod in args.modules.split(',')]
+    manuf = Manuf.by_name(args.manuf).value
+
+    try:
+        num_output = Frac(args.output)
+    except TypeError:
+        num_output = Belt.by_name(args.output).value
+
+    if num_output > 45:
+        raise NotImplementedError(
+            'Outputs of greater than one blue belt not supported!'
+        )
+    elif num_output <= 0:
+        raise ValueError('Output must be positive!')
+
+    prod_manuf = (
+        manuf.with_recipe(Recipe.by_name(args.recipe)).with_modules(modules)
+    )
+
+    prod_manuf.solve_report(num_output)
+
+
+if __name__ == '__main__':
+    main()
+    # Recipe.initialize()
+    # manuf = (
+    #     Manuf.Assembler3.value.with_modules(
+    #         4 * [Item.Module.by_name('p3')]
+    #     ).with_recipe(Recipe.by_name('advanced-circuit'))
+    # )
+
+    # manuf.solve_report(Belt.R)

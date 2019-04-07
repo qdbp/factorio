@@ -102,10 +102,15 @@ class Item:
 
     @dataclass(frozen=True)
     class Module(Subtype):
+        name: str
         prod: Frac
         poll: Frac
         speed: Frac
         power: Frac
+
+        @staticmethod
+        def simple_name(s: str) -> str:
+            return s[0].upper() + s[-1]
 
         @staticmethod
         def by_name(s: str) -> Item.Module:
@@ -165,9 +170,10 @@ class Item:
                         # declarative programmer's demands:
                         # assignment expressions NOW!
                         meta = cls.Module(
+                            name=cls.Module.simple_name(item['name']),
                             **{
                                 k: safe_frac(
-                                    effect.get('v', {
+                                    effect.get(v, {
                                         'bonus': 0
                                     }).get('bonus', 0)
                                 )
@@ -193,6 +199,9 @@ class Item:
 
     def __str__(self):
         return self.name
+
+    def __lt__(self, other):
+        return self.name < other.name
 
 
 @dataclass(frozen=True)
@@ -227,6 +236,10 @@ class Recipe:
     outcomes: t.List[Outcome]
     category: Category
     proddable: bool
+
+    @classmethod
+    def by_name(cls, s: str) -> Recipe:
+        return cls.__recipes[Item.renormalize_name(s)]
 
     @classmethod
     def initialize(cls, which: Version = Version.Expensive):
@@ -358,6 +371,8 @@ class Recipe:
                     )
 
                     cls.__recipes[name] = recipe
+
+        print('Loaded recipes.')
 
     @property
     def is_deterministic(self) -> bool:

@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import typing as ty
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
+from fractions import Fraction as Frac
 from itertools import product
 from tempfile import NamedTemporaryFile
 
 import pulp as pp
 
-from core import Item
+from item import Item
 
 # scale half capacities to keep them integral, ensuring exactness
 BELT_CAP_SCALE = 10
@@ -21,37 +24,118 @@ BELT_CAPACITIES = {
 }
 
 BELT_COSTS = {
-    'yellow': 1,
-    'red': 1,
-    'blue': 1,
+    'yellow': 10,
+    'red': 10,
+    'blue': 10,
 }
-
-POSITION_COSTS = {
-    0: 1,
-    1: 2,
-}
-
 BELT_EXISTS_COST = 5
-BeltSolution = ty.List[ty.Tuple[(int, str, str, str, Item)]]
 
 
+# XXX is it worthwhile to try and read this from game data?
+class Belt(Enum):
+    Y = Frac('15')
+    R = Frac('30')
+    B = Frac('45')
+
+    @classmethod
+    def by_name(cls, s: str) -> Belt:
+        return {
+            'y': cls.Y,
+            'r': cls.R,
+            'b': cls.B,
+        }[s[0].lower()]
+
+    @property
+    def name(self):
+        if self == self.Y:
+            return 'yellow belt'
+        elif self == self.R:
+            return 'red belt'
+        elif self == self.B:
+            return 'blue belt'
+        else:
+            raise AssertionError(f'{self} didn\'t get a name')
+
+    def __str__(self):
+        return {
+            self.Y: 'yellow belt',
+            self.R: 'red belt',
+            self.B: 'blue belt',
+        }[self]
+
+
+@dataclass(frozen=True)
+class BeltAssignment:
+    class Infeasible(Exception):
+        pass
+
+    class Pos(Enum):
+        U = 'U'
+        L = 'L'
+
+        def __lt__(self, other):
+            return self.value < other.value
+
+    line: int
+    pos: Pos
+    belt: Belt
+    item_left: ty.Optional[Item]
+    item_right: ty.Optional[Item]
+
+    def __lt__(self, other):
+        return (self.line, self.pos,
+                self.belt.name) < (other.line, other.pos, other.belt.name)
+
+    def __post_init__(self):
+        # if this fails, we have a problem in our solver
+        assert (self.item_left is not None) or (self.item_right is not None)
+
+    def __str__(self) -> str:
+        return (
+            f'LINE {self.line} / POS {self.pos.value} / '
+            f'{self.belt.name[:3].upper()} : '
+            f'{self.item_left} | {self.item_right}'
+        )
+
+
+# XXX support multiple line layouts
 def solve_belts(
-    flows: ty.List[ty.Tuple[int, Item]],
-    max_lines=4,
-    costs=None,
-    capacities=None,
-) -> BeltSolution:
+        flows: ty.List[Item.Flow],
+        max_lines=3,
+        costs=None,
+        capacities=None,
+) -> ty.List[BeltAssignment]:
     '''
     Solves the optimal belt allocation for the item requirements given by
     `flows`, which should be a list of (items_per_sec, item_name)
+
+
+    Assumes a symmetric layout as follows:
+
+        L1   L2                   L3   O   L3                      L2  L1
+
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^                   ^^^ vvv ^^^                     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+        ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
+                ...                   ...                     ...
+
+    Namely, flows are allocated among L1, L2 and L3 such that a full output
+    line O can be produced. Each of L1, L2 and L3 can be braided; thus up to
+    6 input belts are supported.
     '''
 
     costs = costs or BELT_COSTS.copy()
     capacities = capacities or BELT_CAPACITIES.copy()
 
-    required_flow: ty.Dict[ty.Any, int] = defaultdict(int)
-    for need, item in flows:
-        required_flow[item] += need * BELT_CAP_SCALE
+    required_flow: ty.Dict[str, int] = defaultdict(int)
+    for flow in flows:
+        # divide by 2 since we are splitting flows among mirrored lines
+        required_flow[flow.item.name] += flow.num * BELT_CAP_SCALE
     nothing_key = 'xxx'
     while nothing_key in required_flow:
         nothing_key = '_' + nothing_key
@@ -60,68 +144,86 @@ def solve_belts(
 
     if costs.keys() != capacities.keys():
         raise ValueError(
-            'Inconsistent belt types between costs and capacities.')
+            'Inconsistent belt types between costs and capacities.'
+        )
 
     prob = pp.LpProblem(name="solve_belts", sense=pp.LpMinimize)
 
-    Line = list(range(max_lines))
-    Position = ['U', 'L']
-    BeltType = sorted(costs.keys())
-    Side = ['R', 'L']
-    Item = sorted(required_flow.keys())
+    s_Line = list(range(max_lines))
+    s_Position = list(BeltAssignment.Pos)
+    s_BeltType = sorted(costs.keys())
+    s_side = ['R', 'L']
+    s_Item = sorted(required_flow.keys())
 
     Z = pp.LpVariable.dicts(
-        "Z", (Line, Position, BeltType, Side, Item), 0, 1, pp.LpBinary,
+        "Z",
+        (s_Line, s_Position, s_BeltType, s_side, s_Item),
+        0,
+        1,
+        pp.LpBinary,
     )
+
+    norm_pos_cost = {BeltAssignment.Pos.L: 0, BeltAssignment.Pos.U: 1}
+    norm_line_cost = {0: 0, 1: 1, 2: 2}
 
     # OBJECTIVE
     prob += (
         # complexity
         pp.lpSum(
-            Z[l][p][t][s][i] * costs[t]
-            for l, p, t, s, i in product(Line, Position, BeltType, Side, Item)
+            Z[l][p][t][s][i] * costs[t] for l, p, t, s, i in
+            product(s_Line, s_Position, s_BeltType, s_side, s_Item)
         )
         # excess flow
         + pp.lpSum(
-            Z[l][p][t][s][i] * capacities[t]
-            for l, p, t, s, i in product(Line, Position, BeltType, Side, Item)
+            Z[l][p][t][s][i] * capacities[t] for l, p, t, s, i in
+            product(s_Line, s_Position, s_BeltType, s_side, s_Item)
+        )
+        # normalization costs
+        # XXX these balloon solution time!
+        # TODO do post-solution renormalization instead
+        # line
+        + pp.lpSum(
+            Z[l][p][t][s][i] * norm_line_cost[l] for l, p, t, s, i in
+            product(s_Line, s_Position, s_BeltType, s_side, s_Item)
+        )
+        # position
+        + pp.lpSum(
+            Z[l][p][t][s][i] * norm_pos_cost[p] for l, p, t, s, i in
+            product(s_Line, s_Position, s_BeltType, s_side, s_Item)
         )
     )
 
     # CONSTRAINTS
     # 1. satisfaction
-    for i in Item:
+    for i in s_Item:
         prob += pp.lpSum(
             Z[l][p][t][s][i] * capacities[t]
-            for l, p, t, s in product(Line, Position, BeltType, Side)
+            for l, p, t, s in product(s_Line, s_Position, s_BeltType, s_side)
         ) >= required_flow[i]
 
     # 2. exclusive side type and content
-    for l, p, s in product(Line, Position, Side):
+    for l, p, s in product(s_Line, s_Position, s_side):
         prob += pp.lpSum(
-            Z[l][p][t][s][i]
-            for t, i in product(BeltType, Item)
+            Z[l][p][t][s][i] for t, i in product(s_BeltType, s_Item)
         ) <= 1
 
     # 3. placed belt sides are matched
-    for l, p, t in product(Line, Position, BeltType):
+    for l, p, t in product(s_Line, s_Position, s_BeltType):
         prob += pp.lpSum(
-            Z[l][p][t]['R'][i] - Z[l][p][t]['L'][i]
-            for i in Item
+            Z[l][p][t]['R'][i] - Z[l][p][t]['L'][i] for i in s_Item
         ) == 0
 
     # 4. there are at most two belts (right sides) per line
-    for l in Line:
+    for l in s_Line:
         prob += pp.lpSum(
             Z[l][p][t]['R'][i]
-            for p, t, i in product(Position, BeltType, Item)
+            for p, t, i in product(s_Position, s_BeltType, s_Item)
         ) <= 2
 
     # 5. at most one belt (right side) of a type per line (braiding)
-    for l, t in product(Line, BeltType):
+    for l, t in product(s_Line, s_BeltType):
         prob += pp.lpSum(
-            Z[l][p][t]['R'][i]
-            for p, i in product(Position, Item)
+            Z[l][p][t]['R'][i] for p, i in product(s_Position, s_Item)
         ) <= 1
 
     with NamedTemporaryFile(suffix='.lp') as f:
@@ -129,17 +231,29 @@ def solve_belts(
         prob.writeLP(fn)
         prob.solve()
 
-    print('Belt Solver: status:', pp.LpStatus[prob.status])
-    print('Belt Solver: solution:')
+    if 'Infeasible' in pp.LpStatus[prob.status]:
+        raise BeltAssignment.Infeasible('No solution exists for desired flows')
 
     out = []
-    for l, p, t, s, i in product(Line, Position, BeltType, Side, Item):
-        if pp.value(Z[l][p][t][s][i]) == 1:
-            print('\t', l, p, t, s, i)
-            out.append((l, p, t, s, i))
+    for l, p, t in product(s_Line, s_Position, s_BeltType):
+        items = []
+        for s in s_side:
+            for i in s_Item:
+                if pp.value(Z[l][p][t][s][i]) == 1:
+                    items.append(
+                        Item.by_name(i) if i is not nothing_key else None
+                    )
+                    break
+        assert not items or any(items)
+        if items:
+            out.append(
+                BeltAssignment(
+                    line=l,
+                    pos=BeltAssignment.Pos(p),
+                    belt=Belt.by_name(t),
+                    item_right=items[0],
+                    item_left=items[1],
+                )
+            )
 
     return out
-
-
-if __name__ == '__main__':
-    solve_belts([(10, 'iron'), (20, 'copper'), (10, 'plastic')])
