@@ -6,6 +6,7 @@ from __future__ import annotations
 import typing as ty
 from collections import defaultdict
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from enum import Enum
 from fractions import Fraction as Frac
 from itertools import product
@@ -81,6 +82,74 @@ class BeltAssignment:
     belt: Belt
     item_left: ty.Optional[Item]
     item_right: ty.Optional[Item]
+
+    @staticmethod
+    def normalize(assignments: ty.List[BeltAssignment]
+                  ) -> ty.List[BeltAssignment]:
+        '''
+        Normalize a belt assignment solution set.
+
+        Minimizes hetereogeneous belts.
+        '''
+
+        by_belt_type = defaultdict(list)  # type: ignore
+        for asst in assignments:
+            by_belt_type[asst.belt].append(asst)
+
+        out = []
+        # within each belt type...
+        for bt_assts in by_belt_type.values():
+            assts_copy = set(bt_assts)
+            while True:
+                continue_outer = False
+                by_item = defaultdict(set)  # type: ignore
+                # ... we map each item to the hetero assts that contain it ...
+                for asst in assts_copy:
+                    if asst.item_right == asst.item_left:
+                        continue
+                    by_item[asst.item_left].add(asst)
+                    by_item[asst.item_right].add(asst)
+                    # ... rechecking by_item every time we add a new asst ...
+                    for asst_set in by_item.values():
+                        # ... if ever an item has two hetero assets
+                        # then they can be swapped to homogenize a belt...
+                        if len(asst_set) == 2:
+                            x = asst_set.pop()
+                            y = asst_set.pop()
+
+                            # so we check which assets to swap between the
+                            # belts. Immutability is a guiderail here.
+                            if (x.item_right == y.item_right) or (
+                                    x.item_left == y.item_left):
+                                new_x = dc_replace(x, item_right=y.item_left)
+                                new_y = dc_replace(y, item_left=x.item_right)
+                            else:
+                                new_x = dc_replace(x, item_right=y.item_right)
+                                new_y = dc_replace(y, item_right=x.item_right)
+
+                            # print(
+                            #     f'Normalized lines:'
+                            #     f'\n-- {x}\n-- {y}\n\n++ {new_x}\n++ {new_y}'
+                            # )
+
+                            # we invalidate the originals
+                            assts_copy.discard(x)
+                            assts_copy.discard(y)
+                            # and add the reforged assignments
+                            assts_copy.add(new_x)
+                            assts_copy.add(new_y)
+                            # we continue our search if we did anything
+                            continue_outer = True
+                            break  # for asst_set in by_item.values()
+                    # we continue continuing our search if we did anything
+                    if continue_outer:
+                        break  # for asst in assts_copy
+                # otherwise we are done!
+                if not continue_outer:
+                    break  # while True
+
+            out.extend(list(assts_copy))
+        return sorted(out)
 
     def __lt__(self, other):
         return (self.line, self.pos,
@@ -256,4 +325,4 @@ def solve_belts(
                 )
             )
 
-    return out
+    return BeltAssignment.normalize(out)
