@@ -82,6 +82,17 @@ def get_proddable_items() -> t.FrozenSet[str]:
 @dataclass(frozen=True)
 class Item:
     @dataclass(frozen=True)
+    class Flow:
+        '''
+        Represents an input or output rate of an item.
+        '''
+        num: Frac
+        item: Item
+
+        def __str__(self) -> str:
+            return f'{self.num}×{self.item}'
+
+    @dataclass(frozen=True)
     class Subtype(metaclass=ABCMeta):
         pass
 
@@ -96,11 +107,28 @@ class Item:
         speed: Frac
         power: Frac
 
+        @staticmethod
+        def by_name(s: str) -> Item.Module:
+            try:
+                prefix = {
+                    'p': 'productivity',
+                    'e': 'effectivity',
+                    's': 'speed',
+                }[s[0].lower()]
+                suffix = s[1]
+                return t.cast(
+                    Item.Module,
+                    Item.by_name(f'{prefix}-module-{suffix}').meta
+                )
+
+            except KeyError:
+                raise NoSuchItem
+
     __items: t.ClassVar[t.Dict[str, Item]] = {}
     __modules: t.ClassVar[t.Dict[str, Module]] = {}
 
     name: str
-    meta: t.Optional[Subtype]
+    meta: Subtype
 
     @staticmethod
     def renormalize_name(s: str) -> str:
@@ -168,26 +196,14 @@ class Item:
 
 
 @dataclass(frozen=True)
-class ItemFlow:
-    '''
-    Represents an input or output rate of an item.
-    '''
-    num: Frac
-    item: Item
-
-    def __str__(self) -> str:
-        return f'{self.num}×{self.item}'
-
-
-@dataclass(frozen=True)
 class Recipe:
     @dataclass(frozen=True)
     class Outcome:
         prob: Frac
-        flows: t.List[ItemFlow]
+        flows: t.List[Item.Flow]
 
         @classmethod
-        def pure(cls, flows: t.List[ItemFlow]):
+        def pure(cls, flows: t.List[Item.Flow]):
             return cls(Frac(1), flows)
 
     class Category(Enum):
@@ -207,7 +223,7 @@ class Recipe:
 
     name: str
     time: Frac
-    inputs: t.List[ItemFlow]
+    inputs: t.List[Item.Flow]
     outcomes: t.List[Outcome]
     category: Category
     proddable: bool
@@ -231,7 +247,7 @@ class Recipe:
             if 'result' in raw:
                 out = [
                     Recipe.Outcome.pure([
-                        ItemFlow(
+                        Item.Flow(
                             raw.get('result_count', 1),
                             Item.by_name(raw['result'])
                         )
@@ -256,13 +272,11 @@ class Recipe:
                     for x in raw_results
                 )
 
-                print(all_prob, no_prob, raw_results)
-
                 if all_prob:
                     out = []
                     for product in raw_results:
                         prob = safe_frac(product['probability'])
-                        flow = ItemFlow(
+                        flow = Item.Flow(
                             num=product['amount'],
                             item=Item.by_name(product['name']),
                         )
@@ -272,14 +286,14 @@ class Recipe:
                     for result in raw_results:
                         if isinstance(result, list):
                             flows.append(
-                                ItemFlow(
+                                Item.Flow(
                                     item=Item.by_name(result[0]),
                                     num=result[1]
                                 )
                             )
                         elif isinstance(result, dict):
                             flows.append(
-                                ItemFlow(
+                                Item.Flow(
                                     item=Item.by_name(result['name']),
                                     num=result.get('amount', 1),
                                 )
@@ -327,7 +341,9 @@ class Recipe:
 
                     # XXX ignore fluid ingredients
                     inputs = [
-                        ItemFlow(num=safe_frac(x[1]), item=Item.by_name(x[0]))
+                        Item.Flow(
+                            num=safe_frac(x[1]), item=Item.by_name(x[0])
+                        )
                         for x in raw_recipe['ingredients']
                         if not isinstance(x, dict)
                     ]
@@ -341,7 +357,6 @@ class Recipe:
                         proddable=proddable,
                     )
 
-                    print(recipe)
                     cls.__recipes[name] = recipe
 
     @property
@@ -353,7 +368,7 @@ class Recipe:
         return self.is_deterministic and len(self.outcomes[0].flows) == 1
 
     @property
-    def simple_prod(self) -> ItemFlow:
+    def simple_prod(self) -> Item.Flow:
         if not self.is_simple:
             raise ValueError('Recipe is not simple!')
         else:
@@ -373,7 +388,10 @@ class Recipe:
             "Recipe constructed with outcome probabilities not summing to 1!"
 
     def __str__(self) -> str:
-        out = f'Recipe "{self.name}": {"+".join(map(str, self.inputs))} -> '
+        out = (
+            f'Recipe<{self.category.value}> "{self.name}": '
+            f'{"+".join(map(str, self.inputs))} -> '
+        )
 
         if self.is_simple:
             out_flow = self.simple_prod
