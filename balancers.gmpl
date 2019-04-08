@@ -1,0 +1,70 @@
+# vim: ft=gmpl
+# 
+# Dicovering the optimal M x N balancers, phase 1: max flow
+# Evgeny Naumov, 2019
+
+param M, integer;
+param N, integer;
+param MaxSplitters, integer;
+
+set Inps := 1..M;
+/* input belts */
+
+set Outs := (M+1)..(M+N);
+/* output belts */
+
+set Splitters := (M+N+1)..(MaxSplitters+M+N);
+/* maximum number of splitters */
+
+set Nodes := Inps union Outs union Splitters;
+
+var s{s in Splitters}, binary;
+/* splitter enabled flag */
+var c{u in Nodes, v in Nodes}, integer;
+/* adjacency matrix
+    c[i, j] = 1 <=> flows go from i to j
+    XXX binary means we cannot have both outputs of one splitter feed into
+    another. This should be fine.
+*/
+# var f{u in Nodes, v in Nodes, i in Inps};
+/* typed flows */
+
+minimize cost_overflow: sum{s in Splitters} s;
+/* minimize the number of splitter used */
+/* so elegantly straightforward! */
+
+/* CHAPTER 1: ADJACENCY RESTRICTIONS */
+
+/* 1.1 INPUTS UNIQUELY CONNECTED */
+s.t. inputsconnected{inp in Inps}:
+    sum{v in Nodes} c[inp, v] = 1;
+
+/* 1.2 OUTPUTS UNIQUELY CONNECTED */
+s.t. outputsconnected{out in Outs}:
+    sum{u in Nodes} c[u, out] = 1;
+
+/* XXX 1.3 and 1.4 disallow dangling splitter inputs and outputs */
+/* 1.3 ENABLED SPLITTER OUPUTS WELL CONNECTED */
+s.t. splitterinputs{spl in Splitters}:
+    sum{v in Nodes} c[spl, v] = 2 * s[spl];  /* <= 2 for danglers */
+
+/* 1.4 ENABLED SPLITTER INPUTS WELL CONNECTED */
+s.t. splitteroutputs{spl in Splitters}:
+    sum{u in Nodes} c[u, spl] = 2 * s[spl];  /* <= 2 for danglers */
+
+
+/* CHAPTER 2: GENERIC MAX FLOW RESTRICTIONS */
+/* 2.1 RESPECT CAP */
+s.t. cappedflow{u in Nodes, v in Nodes}:
+    sum{i in Inps} f[u, v, i] <= c[u, v];
+
+/* 2.2 INCOMPRESSIBLE FLOW */
+s.t. incompressible{v in Splitters}:
+    sum{i in Inps, u in Nodes} f[u, v, i] =
+    sum{i in Inps, w in Nodes} f[v, w, i];
+
+data;
+
+param M = 2;
+param N = 2;
+param MaxSplitters = 2;
