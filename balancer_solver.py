@@ -6,30 +6,14 @@ import typing as ty
 from itertools import product
 from tempfile import NamedTemporaryFile
 
+import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import pulp as pp
+import pygraphviz as pgv
+from networkx.drawing.nx_agraph import graphviz_layout, to_agraph
 
-
-def dicts_to_ndarray(
-        dicts,
-        index_sets: ty.Tuple[ty.Sized, ...],
-        dtype=np.float32,
-) -> np.ndarray:
-
-    shape = tuple(len(ixset) for ixset in index_sets)
-
-    def _rworker(plane: np.ndarray, d: ty.Dict, index_sets):
-        if len(index_sets) > 1:
-            for ex, elem in enumerate(index_sets[0]):
-                _rworker(plane[ex, ...], d[elem], index_sets[1:])
-        else:
-            for ex, elem in enumerate(index_sets[0]):
-                plane[ex] = pp.value(d[elem])
-
-    out = np.zeros(shape, dtype=dtype)
-    _rworker(out, dicts, index_sets)
-
-    return out
+from solver_core import dicts_to_ndarray, Infeasible
 
 
 def solve_balancers(
@@ -52,7 +36,7 @@ def solve_balancers(
     Outs = [f'o{ix}' for ix in range(n_outs)]
     Spls = [f's{ix}' for ix in range(max_splitters)]
 
-    Nodes = Inps + Spls + Outs
+    Nodes = Inps + Outs + Spls
 
     # flows
     F = pp.LpVariable.dicts("F", (Nodes, Nodes, Inps))
@@ -125,17 +109,15 @@ def solve_balancers(
         )
 
     # 3.3 SPLITTERS EQUALIZE ALL TYPES
-    for spl in Spls:
-        # n_spl_outs = pp.lpSum(C[spl][w] for w in Nodes)
-        for inp in Inps:
-            inflow = pp.lpSum(F[u][spl][inp] for u in Nodes)
-            for dst in Nodes:
-                # XXX to keep things linear we must hardcode distinct inputs
-                # and distinct outputs UNLESS we have TODO separte indexer sets
-                # for 2->1 and 1->2 wired splitters
-                # afaict this is the only way to encode the splitter condition
-                # (together with flow preservation and capacity respect)
-                prob += 2 * F[spl][dst][i] <= inflow
+    for i, spl in product(Inps, Spls):
+        inflow_i = pp.lpSum(F[u][spl][i] for u in Nodes)
+        for dst in Nodes:
+            # XXX to keep things linear we must hardcode distinct inputs
+            # and distinct outputs UNLESS we have TODO separte indexer sets
+            # for 2->1 and 1->2 wired splitters
+            # afaict this is the only way to encode the splitter condition
+            # (together with flow preservation and capacity respect)
+            prob += 2 * F[spl][dst][i] <= inflow_i
 
     with NamedTemporaryFile(suffix='.lp') as f:
         fn = f.name
@@ -143,20 +125,75 @@ def solve_balancers(
         prob.solve()
 
     if 'Infeasible' in pp.LpStatus[prob.status]:
-        print('INFEASIBLE')
-        return None
+        raise Infeasible
 
-    print('flows:')
-    for inp in Inps:
-        print(f'flow for {inp}')
-        print(dicts_to_ndarray(F, (Nodes, Nodes, [inp])).squeeze())
+    # print('flows:')
+    # for inp in Inps:
+    #     print(f'flow for {inp}')
+    #     print(dicts_to_ndarray(F, (Nodes, Nodes, [inp])).squeeze())
 
-    print('done')
-    return dicts_to_ndarray(C, (Nodes, Nodes))
+    adjmat = dicts_to_ndarray(C, (Nodes, Nodes))
+    keep_rows = np.where(adjmat.sum(axis=0) + adjmat.sum(axis=1) != 0)[0]
+    adjmat = adjmat[np.ix_(keep_rows, keep_rows)]
+    return adjmat, np.array(Nodes)[keep_rows]
+
+
+def draw_adjmat(
+        adjmat: np.ndarray,
+        n_inps: int,
+        n_outs: int,
+        labels=None,
+        graphname='graph.png'
+) -> None:
+
+    n_spls = adjmat.shape[0] - n_inps - n_outs
+
+    g = nx.convert_matrix.from_numpy_array(adjmat, create_using=nx.DiGraph)
+    if labels is not None:
+        g = nx.relabel_nodes(g, {ix: label for ix, label in enumerate(labels)})
+
+    values = ['red'] * n_inps + ['blue'] * n_outs + ['black'] * n_spls
+    # nx.draw_graphviz(g, node_color=values)
+    # plt.savefig('graph.png')
+    for ndx, (_, attrs) in enumerate(g.nodes(data=True)):
+        attrs['fillcolor'] = attrs['color'] = values[ndx]
+
+    A = to_agraph(g)
+    A.layout('dot')
+    A.draw(graphname + '.png')
+
+
+def main():
+    from argparse import ArgumentParser
+    import sys
+
+    parser = ArgumentParser()
+
+    parser.add_argument('ni', type=int, help='number of inputs')
+    parser.add_argument('no', type=int, help='number of outputs')
+    parser.add_argument(
+        'ms', type=int, help='max number of splitters to consider'
+    )
+
+    args = parser.parse_args(sys.argv[1:])
+
+    ni = args.ni
+    no = args.no
+    ms = args.ms
+
+    # graphname = f'{ni}-{no}'
+    graphname = 'graph'
+
+    print(f'Solving the optimal {ni} -> {no} blancer...')
+    try:
+        adjmat, labels = solve_balancers(ni, no, ms)
+    except Infeasible:
+        print(f'No feasible solution with at most {ms} splitters')
+        return
+
+    draw_adjmat(adjmat, ni, no, labels=labels, graphname=graphname)
+    print(f'solution saved to {graphname}.png')
 
 
 if __name__ == '__main__':
-
-    # should give the trivial one-splitter solution, fingers crossed!
-    adj_matrix = solve_balancers(2, 2, 1)
-    print(adj_matrix)
+    main()
