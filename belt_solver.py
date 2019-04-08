@@ -213,8 +213,8 @@ def solve_belts(
         ^^^ ^^^     XXXXXXXXX     ^^^ vvv ^^^       XXXXXXXXX     ^^^ ^^^
                 ...                   ...                     ...
 
-    Namely, flows are allocated among L1, L2 and L3 such that a full output
-    line O can be produced. Each of L1, L2 and L3 can be braided; thus up to
+    Namely, flows are allocated among L1, L2 and L3 such that a target output
+    in line O can be produced. Each of L1, L2 and L3 can be braided; thus up to
     6 input belts are supported.
     '''
 
