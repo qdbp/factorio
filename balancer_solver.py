@@ -17,12 +17,13 @@ from solver_core import Infeasible, dicts_to_ndarray, get_solver
 
 
 def solve_balancers(
-        n_inps: int,
-        n_outs: int,
+        M: int,
+        N: int,
         max_22: int,
         max_12: int,
         max_21: int,
         debug=False,
+        exact_counts=False,
         solver='coin',
 ) -> np.ndarray:
     '''
@@ -34,8 +35,8 @@ def solve_balancers(
 
     prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
-    Inps = [f'i{ix}' for ix in range(n_inps)]
-    Outs = [f'o{ix}' for ix in range(n_outs)]
+    Inps = [f'i{ix}' for ix in range(M)]
+    Outs = [f'o{ix}' for ix in range(N)]
 
     Spls22 = [f's[22]{ix}' for ix in range(max_22)]
     Spls12 = [f's[12]{ix}' for ix in range(max_12)]
@@ -47,14 +48,17 @@ def solve_balancers(
     # tags are identified with inputs for the splitter problem, and this
     # identification is integral to the simplifications below
     # XXX might be integralizable from 0 to 2^f(ms), might be faster?
-    F = pp.LpVariable.dicts("F", (Splitters, Splitters, Inps))
+    Flows = pp.LpVariable.dicts("F", (Splitters, Splitters, Inps))
 
     # splitters enabled
-    S = pp.LpVariable.dicts("S", (Splitters, ), 0, 1, pp.LpBinary)
+    if not exact_counts:
+        S = pp.LpVariable.dicts("S", (Splitters, ), 0, 1, pp.LpBinary)
+    else:
+        S = {s: 1 for s in Splitters}
 
     # capacity matrix
     # c[i, j] = 1 <=> directed capacity of 1 exists from i to j
-    C = pp.LpVariable.dicts("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
+    Conn = pp.LpVariable.dicts("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
 
     # input map: Imap[i, u] == 1 <=> input i flows into splitter u
     Imap = pp.LpVariable.dicts("Imap", (Inps, Splitters), 0, 1, pp.LpBinary)
@@ -70,19 +74,11 @@ def solve_balancers(
     #  1.1.1 each input goes into exactly one splitter
     for inp in Inps:
         prob += pp.lpSum(Imap[inp][u] for u in Splitters) == 1
-    #  1.1.2 each splitter receives at most two inputs
-    # XXX suspect redundant
-    # for u in Splitters:
-    #     prob += pp.lpSum(Imap[inp][u] for inp in Inps) <= 2
 
     #  1.2 OUTPUTS UNIQUELY CONNECTED
     #  1.2.1 each output receives from exactly one splitter
     for out in Outs:
         prob += pp.lpSum(Omap[u][out] for u in Splitters) == 1
-    #  1.2.2 each splitter serves at most two outputs
-    # XXX suspect redundant
-    # for u in Splitters:
-    #     prob += pp.lpSum(Omap[u][out] for out in Outs) <= 2
 
     for (icount, ocount), spls in zip([(2, 2), (1, 2), (2, 1)],
                                       [Spls22, Spls12, Spls21]):
@@ -90,46 +86,46 @@ def solve_balancers(
             outs_from_spl = pp.lpSum(Omap[spl][out] for out in Outs)
             inps_into_spl = pp.lpSum(Imap[inp][spl] for inp in Inps)
             #  1.3 ENABLED SPLITTER OUPUTS WELL CONNECTED
-            prob += pp.lpSum(C[spl][v] for v in Splitters
+            prob += pp.lpSum(Conn[spl][v] for v in Splitters
                              ) + outs_from_spl == ocount * S[spl]
             #  1.4 ENABLED SPLITTER INPUTS WELL CONNECTED
-            prob += pp.lpSum(C[u][spl] for u in Splitters
+            prob += pp.lpSum(Conn[u][spl] for u in Splitters
                              ) + inps_into_spl == icount * S[spl]
             #  1.5 NO GHOST SPLITTERS
             #  1.5.1 no splitters without non-self outputs
-            prob += pp.lpSum(C[spl][v] for v in Splitters if v != spl
+            prob += pp.lpSum(Conn[spl][v] for v in Splitters if v != spl
                              ) + outs_from_spl >= S[spl]
             #  1.5.2 no splitters without non-self inputs
-            prob += pp.lpSum(C[u][spl] for u in Splitters if u != spl
+            prob += pp.lpSum(Conn[u][spl] for u in Splitters if u != spl
                              ) + inps_into_spl >= S[spl]
 
     # # CHAPTER 2: GENERIC MAX-FLOW PROBLEM RESTRICTIONS
     # 2.1 RESPECT FLOW CAP
     for u, v in product(Splitters, Splitters):
-        prob += pp.lpSum(F[u][v][t] for t in Inps) <= C[u][v]
+        prob += pp.lpSum(Flows[u][v][t] for t in Inps) <= Conn[u][v]
 
     # 2.2 GENERALIZED UNIFORM INCOMPRESSIBILITY
     # forall splitter, tag:
-    #    (1)                               output = n_out_cxns / n_tags
+    #    (1)                               output = n_out_cxns / N
     #    (2)                               n_tags = n_inps
     #    (3)                            tot_input = tot_output
     # => (4)                       inflow + input = outflow + output
-    # => (5)             inflow + input - outflow = (n_out_cxns / n_inps)
+    # => (5)             inflow + input - outflow = n_out_cxns / N
     # => (6)  n_inps * (inflow + input - outflow) = n_out_cxns
     for spl in Splitters:
         # forall t.
         n_out_cxns = pp.lpSum(Omap[spl][o] for o in Outs)
         for t in Inps:
-            inflow_t = pp.lpSum(F[u][spl][t] for u in Splitters)
+            inflow_t = pp.lpSum(Flows[u][spl][t] for u in Splitters)
             input_t = Imap[t][spl]
-            outflow_t = pp.lpSum(F[spl][w][t] for w in Splitters)
+            outflow_t = pp.lpSum(Flows[spl][w][t] for w in Splitters)
 
-            prob += n_inps * (inflow_t + input_t - outflow_t) == n_out_cxns
+            prob += N * (inflow_t + input_t - outflow_t) == n_out_cxns
     # NOTE 2.2 implies both matched inputs and balanced outputs
 
     # 2.3 PROPER FLOW
     for u, v, t in product(Splitters, Splitters, Inps):
-        prob += F[u][v][t] >= 0
+        prob += Flows[u][v][t] >= 0
 
     # # FACTORIO RESTRICTIONS
     # 3.1 EQUAL SPLITTING
@@ -140,9 +136,9 @@ def solve_balancers(
     # Output connections are handled automatically by the more draconian
     # fixed output constraint + incompressiblity.
     for t, spl in product(Inps, Spls22 + Spls12):
-        inflow_t = pp.lpSum(F[u][spl][t] for u in Splitters) + Imap[t][spl]
+        inflow_t = pp.lpSum(Flows[u][spl][t] for u in Splitters) + Imap[t][spl]
         for w in Splitters:
-            prob += 2 * F[spl][w][t] <= inflow_t
+            prob += 2 * Flows[spl][w][t] <= inflow_t
     # NOTE: 2-1 splitters handled by 2.2
     # NOTE: out-connections handled by 2.2
 
@@ -154,13 +150,13 @@ def solve_balancers(
     if 'Infeasible' in pp.LpStatus[prob.status]:
         raise Infeasible
 
-    adjmat = dicts_to_ndarray(C, (Splitters, Splitters))
+    adjmat = dicts_to_ndarray(Conn, (Splitters, Splitters))
     keep_rows = np.where(dicts_to_ndarray(S, (Splitters, )) > 0)[0]
     # keep_rows = np.where(adjmat.sum(axis=0) + adjmat.sum(axis=1) != 0)[0]
     adjmat = adjmat[np.ix_(keep_rows, keep_rows)]
 
-    imap = dicts_to_ndarray(Imap, (Inps, Splitters))
-    omap = dicts_to_ndarray(Omap, (Splitters, Outs))
+    imap = dicts_to_ndarray(Imap, (Inps, Splitters))[:, keep_rows]
+    omap = dicts_to_ndarray(Omap, (Splitters, Outs))[keep_rows]
     labels = np.array(Splitters)[keep_rows]
 
     if debug:
@@ -170,7 +166,8 @@ def solve_balancers(
         print(omap)
         for i in Inps:
             print(f'flow for {u}')
-            flows = dicts_to_ndarray(F, (Splitters, Splitters, [i])).squeeze()
+            flows = dicts_to_ndarray(Flows,
+                                     (Splitters, Splitters, [i])).squeeze()
             # flows = flows[np.ix_(keep_rows, keep_rows)]
             print(flows)
 
@@ -266,8 +263,10 @@ def main():
 
     args = parser.parse_args(sys.argv[1:])
 
-    # graphname = f'{ni}-{no}'
-    graphname = 'graph'
+    graphname = (
+        f'balancer_{args.ni}-{args.no}-{"x" if args.exact else "le"}-'
+        f'{args.m22}-{args.m12}-{args.m21}'
+    )
 
     print(f'Solving the optimal {args.ni} -> {args.no} balancer...')
     try:
@@ -278,7 +277,7 @@ def main():
             max_12=args.m12,
             max_21=args.m21,
             debug=args.debug,
-            # exact=args.exact,
+            exact_counts=args.exact,
             solver=args.solver,
         )
     except Infeasible:

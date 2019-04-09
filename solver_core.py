@@ -1,4 +1,5 @@
 import typing as ty
+import os
 import numpy as np
 import pulp as pp
 
@@ -9,7 +10,10 @@ class Infeasible(Exception):
 
 def get_solver(which='coin'):
     if which == 'coin':
-        return pp.solvers.COIN_CMD(threads=4, options=['verbose 5'])
+        return pp.solvers.COIN_CMD(
+            msg=1,
+            threads=(os.cpu_count() or 1),
+        )
     elif which == 'glpk':
         return pp.solvers.GLPK()
 
