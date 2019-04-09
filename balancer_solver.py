@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typing as ty
 from itertools import product
+from math import ceil
 from tempfile import NamedTemporaryFile
 
 import matplotlib.pyplot as plt
@@ -14,6 +15,19 @@ import pygraphviz as pgv
 from networkx.drawing.nx_agraph import graphviz_layout, to_agraph
 
 from solver_core import Infeasible, dicts_to_ndarray, get_solver
+
+
+def lowerbound_splitters(M, N) -> ty.Tuple[int, int, int]:
+    '''
+    Guesses a lower bound on the number of splitters needed for an M-N balancer
+    '''
+
+    # output: (22, 12, 21)
+
+    if M == 1:
+        return (0, ceil(N / 2), 0)
+
+    return (M // 2, 0, 0)
 
 
 def solve_balancers(
@@ -32,8 +46,6 @@ def solve_balancers(
     More efficient than the naive expanded matrix approach, using "implicit"
     input and output flows with inherent restrictions for the splitter problem.
     '''
-
-    prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -65,10 +77,25 @@ def solve_balancers(
     # output map: Omap[u, t] == 1 <=> splitter u flows into output t
     Omap = pp.LpVariable.dicts("Omap", (Splitters, Outs), 0, 1, pp.LpBinary)
 
+    # ## OBJECTIVE
+    prob = pp.LpProblem(
+        name="solve_balancer",
+        sense=pp.LpMinimize,
+    )
     # it starts out gently enough...
-    prob += pp.lpSum(S[spl] for spl in Splitters)
+    # NOTE: optimizer tuning: add discriminating coefficients
+    prob += pp.lpSum(S[spl] * sx for sx, spl in enumerate(Splitters))
+    # NOTE: optimizer tuning: EXPERIMENTAL splitter ordering regularization
+    for ix, si in enumerate(Splitters):
+        # try to were inputs to "low" splitters
+        prob += ix * pp.lpSum(Imap[t][si] for t in Inps)
+        # try to wire outputs from "late" splitters
+        prob += (-ix * pp.lpSum(Omap[si][o] for o in Outs))
+        # penalize "backflow"
+        for jx, sj in zip(range(ix), Splitters):
+            prob += (ix - jx) * Conn[si][sj]
 
-    # ## RESTRICTIONS
+    # ## CONSTRAINTS
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     #  1.1 INPUTS WELL CONNECTED
     #  1.1.1 each input goes into exactly one splitter
@@ -91,13 +118,15 @@ def solve_balancers(
             #  1.4 ENABLED SPLITTER INPUTS WELL CONNECTED
             prob += pp.lpSum(Conn[u][spl] for u in Splitters
                              ) + inps_into_spl == icount * S[spl]
-            #  1.5 NO GHOST SPLITTERS
-            #  1.5.1 no splitters without non-self outputs
-            prob += pp.lpSum(Conn[spl][v] for v in Splitters if v != spl
-                             ) + outs_from_spl >= S[spl]
-            #  1.5.2 no splitters without non-self inputs
-            prob += pp.lpSum(Conn[u][spl] for u in Splitters if u != spl
-                             ) + inps_into_spl >= S[spl]
+            # 1.5 NO SELF-LOOPS
+            prob += Conn[spl][spl] == 0
+            # XXX OBSOLESCENT #  1.5 NO GHOST SPLITTERS
+            # #  1.5.1 no splitters without non-self outputs
+            # prob += pp.lpSum(Conn[spl][v] for v in Splitters if v != spl
+            #                  ) + outs_from_spl >= S[spl]
+            # #  1.5.2 no splitters without non-self inputs
+            # prob += pp.lpSum(Conn[u][spl] for u in Splitters if u != spl
+            #                  ) + inps_into_spl >= S[spl]
 
     # # CHAPTER 2: GENERIC MAX-FLOW PROBLEM RESTRICTIONS
     # 2.1 RESPECT FLOW CAP
@@ -142,6 +171,15 @@ def solve_balancers(
     # NOTE: 2-1 splitters handled by 2.2
     # NOTE: out-connections handled by 2.2
 
+    # # 3.2 SPLITTER LOWER BOUND
+    if not exact_counts:
+        for lb, spls in zip(lowerbound_splitters(M, N),
+                            [Spls22, Spls12, Spls21]):
+            prob += pp.lpSum(S[spl] for spl in spls) >= lb
+
+    # ## SOLVING
+    # #
+    #
     with NamedTemporaryFile(suffix='.lp') as f:
         fn = f.name
         prob.writeLP(fn)
