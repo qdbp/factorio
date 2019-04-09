@@ -7,6 +7,11 @@ class Infeasible(Exception):
     pass
 
 
+def get_solver():
+    return pp.solvers.COIN_CMD(threads=4, options=['verbose 5'])
+    # return pp.solvers.GLPK()
+
+
 def dicts_to_ndarray(
         dicts,
         index_sets: ty.Tuple[ty.Sized, ...],

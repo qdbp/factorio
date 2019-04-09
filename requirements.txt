@@ -1,2 +1,3 @@
 SLPP-23
 pulp
+numpy
