@@ -414,6 +414,9 @@ def main():
     )
     print(f'solution saved to {graphname}.png')
 
+    np.save(f'{graphname}.npy', adjmat)
+    print(f'adjmat saved to {graphname}.npy')
+
 
 if __name__ == '__main__':
     main()
