@@ -15,7 +15,7 @@ from solver_core import (
     Infeasible, dicts_to_ndarray, get_solver, in_sol_dir, ndarray_to_dicts
 )
 
-SOL_DUBDIR = '/balancers/'
+SOL_SUBDIR = './balancers/'
 
 
 def lowerbound_splitters(M, N) -> int:
@@ -411,7 +411,7 @@ def main():
         f'bal_{args.ni}-{args.no}-{"x" if args.exact else "le"}-'
         f'{args.maxs}'
     )
-    graphname = str(in_sol_dir(SOL_DUBDIR + graphname))
+    graphname = str(in_sol_dir(SOL_SUBDIR + graphname))
 
     print(f'Solving the optimal {args.ni} -> {args.no} balancer...')
     try:
