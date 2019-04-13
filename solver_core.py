@@ -1,20 +1,30 @@
 import os
 import typing as ty
+from pathlib import Path
 
 import numpy as np
 import pulp as pp
+
+SOLDIR = Path('./solutions/')
 
 
 class Infeasible(Exception):
     pass
 
 
-def get_solver(which='coin'):
+def in_sol_dir(fn: str) -> Path:
+    SOLDIR.mkdir(exist_ok=True)
+    return SOLDIR.joinpath(fn)
+
+
+def get_solver(which='coin', threads: int = None):
     if which == 'coin':
         return pp.solvers.COIN_CMD(
             msg=1,
-            threads=(os.cpu_count() or 1),
+            threads=(threads or os.cpu_count() or 1),
         )
+    if which == 'coinmp':
+        return pp.solvers.COINMP_DLL()
     elif which == 'glpk':
         return pp.solvers.GLPK()
 

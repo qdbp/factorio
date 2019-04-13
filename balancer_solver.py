@@ -2,21 +2,20 @@
 # Evgeny Naumov, 2019
 from __future__ import annotations
 
-import typing as ty
-from itertools import permutations, product
+from itertools import product
 from math import ceil
 from tempfile import NamedTemporaryFile
 
-import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pulp as pp
-import pygraphviz as pgv
-from networkx.drawing.nx_agraph import graphviz_layout, to_agraph
+from networkx.drawing.nx_agraph import to_agraph
 
 from solver_core import (
-    Infeasible, dicts_to_ndarray, get_solver, ndarray_to_dicts
+    Infeasible, dicts_to_ndarray, get_solver, in_sol_dir, ndarray_to_dicts
 )
+
+SOL_DUBDIR = '/balancers/'
 
 
 def lowerbound_splitters(M, N) -> int:
@@ -215,7 +214,7 @@ def solve_balancers(
 
         # CI1[s] == 1 <=> s0 -> s for any s0 in CI0
         CI1 = {
-            v: pp.lpSum(Conn[u][v] * CI0[v] for u in Splitters)
+            v: pp.lpSum(Conn[u][v] * CI0[u] for u in Splitters)
             for v in Splitters
         }
 
@@ -225,7 +224,7 @@ def solve_balancers(
             prob += Conn[u][v] + CI0[u] + CO1[v] <= 2
             prob += Conn[u][v] + CI1[u] + CO0[v] <= 2
 
-    # NOTE higher separation theorems are non-linear
+    # NOTE higher separation theorems are non-linear.
 
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED
@@ -317,21 +316,6 @@ def solve_balancers(
     omap = dicts_to_ndarray(Omap, (Splitters, Outs))[keep_rows]
     labels = np.array(Splitters)[keep_rows]
 
-    if debug:
-        print('S')
-        print(dicts_to_ndarray(S, (Splitters, )))
-        print('adjmat')
-        print(adjmat)
-        print('imap')
-        print(imap)
-        print('omap')
-        print(omap)
-        for i in Inps:
-            print(f'flow for {i}')
-            flows = dicts_to_ndarray(Fs, (Splitters, Splitters, [i])).squeeze()
-            # flows = flows[np.ix_(keep_rows, keep_rows)]
-            print(flows)
-
     return imap, omap, adjmat, labels
 
 
@@ -341,7 +325,6 @@ def draw_solution(
         splmat: np.ndarray,
         labels=None,
         graphname='graph.png',
-        debug=False,
 ) -> None:
 
     n_inps = imap.shape[0]
@@ -360,8 +343,6 @@ def draw_solution(
     #  |____|__________|___|
     #  | 0  |     0    | 0 |
     #  |____|__________|___|
-    # one can see why I switched to implicit flows - too many zeroes!
-
     full_adjmat = np.zeros(
         (n_inps + n_spls + n_outs, ) * 2,
         dtype=np.uint8,
@@ -369,9 +350,6 @@ def draw_solution(
     full_adjmat[:n_inps, n_inps:-n_outs] = imap
     full_adjmat[n_inps:-n_outs, n_inps:-n_outs] = splmat
     full_adjmat[n_inps:-n_outs, -n_outs:] = omap
-
-    if debug:
-        print(full_adjmat)
 
     g = nx.convert_matrix.from_numpy_array(
         full_adjmat, create_using=nx.DiGraph
@@ -419,9 +397,6 @@ def main():
         help='splitter counts are treated as exact instead of as upper bounds'
     )
     parser.add_argument(
-        '--debug', action='store_true', help='enable debug mode'
-    )
-    parser.add_argument(
         '--solver', type=str, default='coin', help='specify the solver'
     )
     parser.add_argument(
@@ -433,9 +408,10 @@ def main():
     args = parser.parse_args(sys.argv[1:])
 
     graphname = (
-        f'balancer_{args.ni}-{args.no}-{"x" if args.exact else "le"}-'
+        f'bal_{args.ni}-{args.no}-{"x" if args.exact else "le"}-'
         f'{args.maxs}'
     )
+    graphname = str(in_sol_dir(SOL_DUBDIR + graphname))
 
     print(f'Solving the optimal {args.ni} -> {args.no} balancer...')
     try:
@@ -444,7 +420,6 @@ def main():
             args.no,
             max_spls=args.maxs,
             min_spls=args.mins,
-            debug=args.debug,
             exact_counts=args.exact,
             solver=args.solver,
         )
@@ -458,7 +433,6 @@ def main():
         adjmat,
         labels=labels,
         graphname=graphname,
-        debug=args.debug,
     )
     print(f'solution saved to {graphname}.png')
 
