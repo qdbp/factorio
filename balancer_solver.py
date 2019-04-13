@@ -70,7 +70,7 @@ def solve_balancers(
     n_s_opinned = 0 if N < 3 else ceil(N / 2)
 
     # we must have at least the input and output pinned splitters
-    assert min_spls >= n_s_ipinned + n_s_opinned
+    min_spls = max(min_spls, n_s_ipinned + n_s_opinned)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -89,20 +89,26 @@ def solve_balancers(
     # internal flows
     Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
 
-    # we map inputs to fixed splitters
+    # Theorem 1. We can pack all inputs without loss of generality.
+    # i.e. We can have inputs 0, 1 -> splitter 0, 1, 2 -> splitter 2, etc.
+    # Proof:
+    # suppose we have a working balancer with input splitter, s0, s1, s.t.
+    #   a->[s]<-i1, b->[t]<-i2 where i1, i2 are inputs
+    # We know that by the balancer property i1, i2, a, and b are split
+    # equally among all outputs. Swapping in connections a and i2 preserves
+    # this. Therefore the sysem a->[s]<-b, i1->[s]<-i2 is also a balancer with
+    # the same internal topology.
     fixed_imap = np.zeros((M, len(Splitters)), dtype=np.uint8)
     for ix in range(M):
         fixed_imap[ix][ix // 2] = 1
     Imap = ndarray_to_dicts(fixed_imap, (Inps, Splitters))
 
-    # we can also fix all outputs by packing them. This follows from the fact
-    # that all output belts have equal flows. Proof:
-    # Suppose we have two output splitters, [->output, ->a], [->output, ->b]
-    # we have that ->a == ->output == ->b by the balancing requirement and
-    # the fact that splitters split evenly.
-    # Therefore we can swap the output as: [->output, ->output], [->a, ->b]
-    # with equivalent flows to all outputs.
-    # Therefore outputs can be pack-pinned like inputs.
+    # Theorem 2. We can pack all outputs without loss of generality.
+    # Proof. Suppos we have a balancer with output splitters s0, s1, such that
+    #   a<-[s0]->o0, b<-[s1]->o1 where o0, o1 are output lines.
+    # Balancing and equal splitting imply ->a == ->o0 == ->01 == ->b
+    # Therefore the system given by swapping the outputs on the two splitters
+    # o0<-s0->o1, a<-s1->b is an equivalent balancer.
     if n_s_opinned > 0:
         fixed_omap = np.zeros((len(Splitters), N), dtype=np.uint8)
         for ix in range(N):
@@ -170,14 +176,56 @@ def solve_balancers(
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     prob += pp.lpSum(S[u] for u in Splitters) >= min_spls
 
-    # 0.4: SPLITTER SEPARATION RESTRICTION
-    # If N > 4, it cannot be that an input splitter is connected to an output
-    # splitter directly, since that would have flow of at least 1/4 of one
-    # input type.
+    # 0.4: SPLITTER SEPARATION THEOREM
+    # Theorem 3. If N > 4, an input splitter cannot be connected to an output
+    # splitter.
+    # Proof. The fraction of item i on output o i -> s0 -> s1 -> o is
+    # at least 1 / 4. Balancing requires that it be 1 / N < 1 / 4.
+    # Therefore such a subgraph cannot exist.
+    # NOTE the N > 2 splitter separation theorm is implied by the splitter
+    # pinning restrictions.
     if N > 4:
+        print('Solver/Info: invoking N > 4 separation theorem.')
         for si, so in product(Splitters[:n_s_ipinned],
                               Splitters[-n_s_opinned:]):
             prob += Conn[si][so] == 0
+
+    # Extension 3.1. If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
+    # NOTE this theorem can be expressed linearly because of fixed inputs
+    # and outputs.
+    if N > 8:
+        print('Solver/Info: invoking N > 8 separation theorem.')
+        CO0_base = np.zeros(len(Splitters), dtype=np.uint8)
+        CO0_base[-n_s_opinned:] = 1
+        # CO0[s] = 1 if s -> output for any output
+        # this is a constatn
+        CO0 = ndarray_to_dicts(CO0_base, (Splitters, ))
+
+        CI0_base = np.zeros(len(Splitters), dtype=np.uint8)
+        CI0_base[:n_s_ipinned] = 1
+        # CI0[s] = 1 if input -> s for any input
+        # this is constant
+        CI0 = ndarray_to_dicts(CI0_base, (Splitters, ))
+
+        # CO1[s] == 1 <=> s -> s0 for any s0 in CO0
+        CO1 = {
+            u: pp.lpSum(Conn[u][v] * CO0[v] for v in Splitters)
+            for u in Splitters
+        }
+
+        # CI1[s] == 1 <=> s0 -> s for any s0 in CI0
+        CI1 = {
+            v: pp.lpSum(Conn[u][v] * CI0[v] for u in Splitters)
+            for v in Splitters
+        }
+
+        # we have NOT (Conn[u, v] and CI0[u] == 1 and CO1[v] == 1) AND
+        # NOT (Conn[u, v] and CI1[u] == 1 and CO0[v] == 1)
+        for u, v in product(Splitters, Splitters):
+            prob += Conn[u][v] + CI0[u] + CO1[v] <= 2
+            prob += Conn[u][v] + CI1[u] + CO0[v] <= 2
+
+    # NOTE higher separation theorems are non-linear
 
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED
