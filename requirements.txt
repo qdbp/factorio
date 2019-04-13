@@ -1,3 +1,6 @@
 SLPP-23
 pulp
 numpy
+networkx
+matplotlib
+pygraphviz
