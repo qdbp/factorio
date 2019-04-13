@@ -24,6 +24,7 @@ def lowerbound_splitters(M, N) -> int:
     Guesses a lower bound on the number of splitters needed for an M-N balancer
     '''
 
+    # must place at least ceil(lg(N)) splitters between every input and output
     return ceil(np.log2(N)) * ceil(M / 2)
 
 
@@ -60,15 +61,21 @@ def solve_balancers(
             'lower than the max given'
         )
 
+    # number of pinned input splitters
+    n_s_ipinned = ceil(M / 2)
+    # number of pinned output splitters
+    # if N >= 3, outputs can't be connected straight to an input splitter. ->
+    # min_spls >= ceil(M/2) + (ceil(N/2))
+    # For N < 3 (just to be correct!), no splitters are opinned
+    n_s_opinned = 0 if N < 3 else ceil(N / 2)
+
+    # we must have at least the input and output pinned splitters
+    assert min_spls >= n_s_ipinned + n_s_opinned
+
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
 
     Splitters = [f's{ix}' for ix in range(max_spls)]
-
-    # Spls22 = [f's[22]{ix}' for ix in range(max_22)]
-    # Spls12 = [f's[12]{ix}' for ix in range(max_12)]
-    # Spls21 = [f's[21]{ix}' for ix in range(max_21)]
-    # Splitters = Spls22 + Spls21 + Spls12
 
     # splitters enabled
     if not exact_counts:
@@ -82,18 +89,33 @@ def solve_balancers(
     # internal flows
     Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
 
-    # input map: Imap[i, u] == 1 <=> input i flows into splitter u
-    # Imap = pp.LpVariable.dicts("Imap", (Inps, Splitters), 0, 1, pp.LpBinary)
-    # XXX experimental, fixed map of inputs
-    fixed_imap = np.zeros((M, len(Splitters)))
+    # we map inputs to fixed splitters
+    fixed_imap = np.zeros((M, len(Splitters)), dtype=np.uint8)
     for ix in range(M):
         fixed_imap[ix][ix // 2] = 1
     Imap = ndarray_to_dicts(fixed_imap, (Inps, Splitters))
 
+    # we can also fix all outputs by packing them. This follows from the fact
+    # that all output belts have equal flows. Proof:
+    # Suppose we have two output splitters, [->output, ->a], [->output, ->b]
+    # we have that ->a == ->output == ->b by the balancing requirement and
+    # the fact that splitters split evenly.
+    # Therefore we can swap the output as: [->output, ->output], [->a, ->b]
+    # with equivalent flows to all outputs.
+    # Therefore outputs can be pack-pinned like inputs.
+    if n_s_opinned > 0:
+        fixed_omap = np.zeros((len(Splitters), N), dtype=np.uint8)
+        for ix in range(N):
+            fixed_omap[len(Splitters) - 1 - ix // 2][ix] = 1
+        Omap = ndarray_to_dicts(fixed_omap, (Splitters, Outs))
+    else:
+        Omap = pp.LpVariable.dicts(
+            "Omap", (Splitters, Outs), 0, 1, pp.LpBinary
+        )
+
     # input flows
     Fi = pp.LpVariable.dicts("Fi", (Inps, Splitters, Inps))
     # output map: Omap[u, t] == 1 <=> splitter u flows into output t
-    Omap = pp.LpVariable.dicts("Omap", (Splitters, Outs), 0, 1, pp.LpBinary)
     # output flows
     Fo = pp.LpVariable.dicts("Fo", (Splitters, Outs, Inps))
 
@@ -103,20 +125,16 @@ def solve_balancers(
         sense=pp.LpMinimize,
     )
 
-    # NOTE: optimizer tuning: add discriminating coefficients
     objective = pp.LpAffineExpression()
-    objective += pp.lpSum(100 * S[spl] for spl in Splitters)
+    # penalize number of intermediate splitters
+    objective += pp.lpSum(
+        100 * S[spl]
+        for spl in Splitters[n_s_ipinned:len(Splitters) - n_s_opinned]
+    )
 
-    # for exact, we want to keep the objective 0 to quit on first feasible
+    # search-biasing objective terms
     if not exact_counts:
         for ix, si in enumerate(Splitters):
-            # try to wire inputs to "low" splitters
-            # objective += ix * pp.lpSum(Imap[t][si] for t in Inps)
-            # try to wire outputs from "late" splitters
-            objective += (-ix * pp.lpSum(Omap[si][o] for o in Outs))
-            # # overall, we aim for an adjecency matrix that's as
-            # "diagonal as possible" while still having the objective
-            # dominated by splitter count
             # penalize "backflow"
             for jx, sj in zip(range(ix), Splitters):
                 objective += (ix - jx) * Conn[si][sj]
@@ -127,20 +145,39 @@ def solve_balancers(
 
     prob += objective
 
+    print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
+    print(
+        f'Solver/Info: {n_s_ipinned} input pinned; '
+        f'{n_s_opinned} output pinned'
+    )
+
     # ## CONSTRAINTS
     # # CHAPTER 0: FORMULATION RESTRICTIONS
-    # 0.1: enable splitters in order
+    # 0.1: RESPECT PINS
+    for ix in range(n_s_ipinned):
+        prob += S[Splitters[ix]] == 1
+    for jx in range(n_s_opinned):
+        prob += S[Splitters[-jx - 1]] == 1
+
+    # 0.2: UNPINNED SPLITTERS ARE ORDERED
     if not exact_counts:
-        for u, v in zip(Splitters, Splitters[1:]):
-            S[u] >= S[v]
-    # 0.2: min splitters
+        for u, v in zip(Splitters[n_s_ipinned:],
+                        Splitters[n_s_ipinned + 1:n_s_opinned]):
+            prob += S[u] >= S[v]
+
+    # 0.3: MINIMUM NUMBER OF SPLITTER
     # each input must have at least ceil(lg(N)) between it and any output
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     prob += pp.lpSum(S[u] for u in Splitters) >= min_spls
 
-    if not exact_counts:
-        for u, v in zip(Splitters, Splitters[1:]):
-            S[u] >= S[v]
+    # 0.4: SPLITTER SEPARATION RESTRICTION
+    # If N > 4, it cannot be that an input splitter is connected to an output
+    # splitter directly, since that would have flow of at least 1/4 of one
+    # input type.
+    if N > 4:
+        for si, so in product(Splitters[:n_s_ipinned],
+                              Splitters[-n_s_opinned:]):
+            prob += Conn[si][so] == 0
 
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED

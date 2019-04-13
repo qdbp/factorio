@@ -33,7 +33,10 @@ def dicts_to_ndarray(
                 _rworker(subdim[ex, ...], d[elem], index_sets[1:])
         else:
             for ex, elem in enumerate(index_sets[0]):
-                subdim[ex] = pp.value(d[elem])
+                try:
+                    subdim[ex] = pp.value(d[elem])
+                except AttributeError:
+                    subdim[ex] = d[elem]
 
     out = np.zeros(shape, dtype=dtype)
     _rworker(out, dicts, index_sets)
