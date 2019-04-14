@@ -12,6 +12,10 @@ class Infeasible(Exception):
     pass
 
 
+class IllSpecified(Exception):
+    pass
+
+
 def in_sol_dir(fn: str) -> Path:
     SOLDIR.mkdir(exist_ok=True)
     return SOLDIR.joinpath(fn)
@@ -73,3 +77,10 @@ def ndarray_to_dicts(
         }
 
     return _rworker(arr, index_sets)
+
+
+def get_dict_depth(d: ty.Any):
+    is_dict = isinstance(d, dict)
+    return int(is_dict) + (
+        0 if not is_dict else get_dict_depth(d[list(d.keys())[0]])
+    )

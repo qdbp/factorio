@@ -12,13 +12,14 @@ import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
 from solver_core import (
-    Infeasible, dicts_to_ndarray, get_solver, in_sol_dir, ndarray_to_dicts
+    IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
+    ndarray_to_dicts
 )
 
 SOL_SUBDIR = './balancers/'
 
 
-def lowerbound_splitters(M, N) -> int:
+def lowerbound_splitters(M: int, N: int) -> int:
     '''
     Guesses a lower bound on the number of splitters needed for an M-N balancer
     '''
@@ -47,7 +48,7 @@ def solve_balancers(
     '''
 
     if M > N:
-        raise ValueError(
+        raise IllSpecified(
             'The problem formulation only allows for fanout designs. '
             'Note that an optimal N -> M solution can be reversed to give '
             'what you want.'
@@ -55,25 +56,25 @@ def solve_balancers(
 
     min_spls = max(lowerbound_splitters(M, N), min_spls)
     if max_spls < min_spls:
-        raise ValueError(
+        raise Infeasible(
             f'Balancing {M} -> {N} requires at least {min_spls}, which is '
             'lower than the max given'
         )
 
-    # number of pinned input splitters
+    # number of pinned input splitters, disjoint from output splitters
     n_s_ipinned = ceil(M / 2)
-    # number of pinned output splitters
-    # if N >= 3, outputs can't be connected straight to an input splitter. ->
-    # min_spls >= ceil(M/2) + (ceil(N/2))
-    # For N < 3 (just to be correct!), no splitters are opinned
-    n_s_opinned = 0 if N < 3 else ceil(N / 2)
+
+    # number of pinned output splitters, disjoint from input splitters
+    # if N > 2, outputs can't be connected straight to an input splitter.
+    # This is the first separation theorem (see below)
+    n_s_opinned = ceil(N / 2) if N > 2 else 0
 
     # we must have at least the input and output pinned splitters
+    # this can be better than the previous lower bound for some M, N
     min_spls = max(min_spls, n_s_ipinned + n_s_opinned)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
-
     Splitters = [f's{ix}' for ix in range(max_spls)]
 
     # splitters enabled
@@ -83,7 +84,7 @@ def solve_balancers(
         S = {s: 1 for s in Splitters}
 
     # capacity matrix
-    # c[i, j] = 1 <=> directed capacity of 1 exists from i to j
+    # Conn[i, j] = 1 <=> directed capacity of 1 exists from i to j
     Conn = pp.LpVariable.dicts("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
     # internal flows
     Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
@@ -150,7 +151,10 @@ def solve_balancers(
 
     prob += objective
 
-    print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
+    if not exact_counts:
+        print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
+    else:
+        print(f'Solver/Info: solving with exactly {max_spls} splitters')
     print(
         f'Solver/Info: {n_s_ipinned} input pinned; '
         f'{n_s_opinned} output pinned'
@@ -175,12 +179,13 @@ def solve_balancers(
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     prob += pp.lpSum(S[u] for u in Splitters) >= min_spls
 
-    # 0.4: SPLITTER SEPARATION THEOREM
-    # Theorem 3. If N > 4, an input splitter cannot be connected to an output
-    # splitter.
-    # Proof. The fraction of item i on output o i -> s0 -> s1 -> o is
-    # at least 1 / 4. Balancing requires that it be 1 / N < 1 / 4.
-    # Therefore such a subgraph cannot exist.
+    # 0.4: SPLITTER SEPARATION THEOREMS
+    # Theorem 3.
+    # If N > 4, an input splitter cannot be connected to an output splitter.
+    # Proof.
+    # The fraction of item i on output o under a subgraph like
+    # i -> s0 -> s1 -> o is at least 1 / 4. Balancing requires that it
+    # be 1 / N < 1 / 4.  Therefore such a subgraph cannot exist.
     # NOTE the N > 2 splitter separation theorm is implied by the splitter
     # pinning restrictions.
     if N > 4:
@@ -189,9 +194,11 @@ def solve_balancers(
                               Splitters[-n_s_opinned:]):
             prob += Conn[si][so] == 0
 
-    # Extension 3.1. If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
-    # NOTE this theorem can be expressed linearly because of fixed inputs
-    # and outputs.
+    # Extension 3.1.
+    # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
+    # Proof. As above.
+    # NOTE this theorem can be expressed linearly because of fixed input
+    # and output maps.
     if N > 8:
         print('Solver/Info: invoking N > 8 separation theorem.')
         CO0_base = np.zeros(len(Splitters), dtype=np.uint8)
@@ -206,13 +213,13 @@ def solve_balancers(
         # this is constant
         CI0 = ndarray_to_dicts(CI0_base, (Splitters, ))
 
-        # CO1[s] == 1 <=> s -> s0 for any s0 in CO0
+        # CO1[v] == 1 <=> exists w in Splitters : C[v][w] == 1 and CO0[w] == 1
         CO1 = {
             u: pp.lpSum(Conn[u][v] * CO0[v] for v in Splitters)
             for u in Splitters
         }
 
-        # CI1[s] == 1 <=> s0 -> s for any s0 in CI0
+        # CI1[v] == 1 <=> exists u in Splitters : C[u][v] == 1 and CI0[u] == 1
         CI1 = {
             v: pp.lpSum(Conn[u][v] * CI0[u] for u in Splitters)
             for v in Splitters
@@ -225,10 +232,14 @@ def solve_balancers(
             prob += Conn[u][v] + CI1[u] + CO0[v] <= 2
 
     # NOTE higher separation theorems are non-linear.
+    # NOTE it can be approximated (lower-bound on the number of constraints)
+    # by "higher order pinning" similar to that implicit in the lowerbound
+    # calculation
 
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED
     # 1.1.1 each input goes into exactly one splitter
+    # TODO these are redundant with i/o pinning enabled
     for inp in Inps:
         prob += pp.lpSum(Imap[inp][u] for u in Splitters) == 1
     # 1.1.2 each splitter receives from at most two inputs
@@ -298,11 +309,7 @@ def solve_balancers(
 
     # ## SOLVING
     # #
-    #
-    with NamedTemporaryFile(suffix='.lp') as f:
-        fn = f.name
-        prob.writeLP(fn)
-        prob.solve(solver=get_solver(which=solver))
+    prob.solve(solver=get_solver(which=solver))
 
     if 'Infeasible' in pp.LpStatus[prob.status]:
         raise Infeasible
