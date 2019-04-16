@@ -12,8 +12,8 @@ import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
 from solver_core import (
-    IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
-    ndarray_to_dicts
+    IllSpecified, Infeasible, dicts_to_ndarray, get_lparr_value, get_solver,
+    in_sol_dir, lparray, ndarray_to_dicts, number, numprod
 )
 
 SOL_SUBDIR = './balancers/'
@@ -61,6 +61,10 @@ def solve_balancers(
             'lower than the max given'
         )
 
+    # special case needed for fixed omaps
+    if N == 2:
+        max_spls = 1
+
     # number of pinned input splitters, disjoint from output splitters
     n_s_ipinned = ceil(M / 2)
 
@@ -79,15 +83,16 @@ def solve_balancers(
 
     # splitters enabled
     if not exact_counts:
-        S = pp.LpVariable.dicts("S", (Splitters, ), 0, 1, pp.LpBinary)
+        S = lparray.create("S", (Splitters, ), 0, 1, pp.LpBinary)
     else:
-        S = {s: 1 for s in Splitters}
+        S = np.ones(len(Splitters), dtype=np.uint8)
 
     # capacity matrix
     # Conn[i, j] = 1 <=> directed capacity of 1 exists from i to j
-    Conn = pp.LpVariable.dicts("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
+    Conn = lparray.create("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
     # internal flows
-    Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
+    # Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
+    Fs = lparray.create("Fs", (Splitters, Splitters, Inps))
 
     # Theorem 1. We can pack all inputs without loss of generality.
     # i.e. We can have inputs 0, 1 -> splitter 0, 1, 2 -> splitter 2, etc.
@@ -98,10 +103,9 @@ def solve_balancers(
     # equally among all outputs. Swapping in connections a and i2 preserves
     # this. Therefore the sysem a->[s]<-b, i1->[s]<-i2 is also a balancer with
     # the same internal topology.
-    fixed_imap = np.zeros((M, len(Splitters)), dtype=np.uint8)
+    Imap = np.zeros((M, len(Splitters)), dtype=np.uint8)
     for ix in range(M):
-        fixed_imap[ix][ix // 2] = 1
-    Imap = ndarray_to_dicts(fixed_imap, (Inps, Splitters))
+        Imap[ix, ix // 2] = 1
 
     # Theorem 2. We can pack all outputs without loss of generality.
     # Proof. Suppos we have a balancer with output splitters s0, s1, such that
@@ -109,21 +113,18 @@ def solve_balancers(
     # Balancing and equal splitting imply ->a == ->o0 == ->01 == ->b
     # Therefore the system given by swapping the outputs on the two splitters
     # o0<-s0->o1, a<-s1->b is an equivalent balancer.
-    if n_s_opinned > 0:
-        fixed_omap = np.zeros((len(Splitters), N), dtype=np.uint8)
-        for ix in range(N):
-            fixed_omap[len(Splitters) - 1 - ix // 2][ix] = 1
-        Omap = ndarray_to_dicts(fixed_omap, (Splitters, Outs))
-    else:
-        Omap = pp.LpVariable.dicts(
-            "Omap", (Splitters, Outs), 0, 1, pp.LpBinary
-        )
+    Omap = np.zeros((len(Splitters), N), dtype=np.uint8)
+    for ix in range(N):
+        Omap[len(Splitters) - 1 - ix // 2, ix] = 1
+
+    print(Imap)
+    print(Omap)
 
     # input flows
-    Fi = pp.LpVariable.dicts("Fi", (Inps, Splitters, Inps))
+    Fi = lparray.create("Fi", (Inps, Splitters, Inps))
     # output map: Omap[u, t] == 1 <=> splitter u flows into output t
     # output flows
-    Fo = pp.LpVariable.dicts("Fo", (Splitters, Outs, Inps))
+    Fo = lparray.create("Fo", (Splitters, Outs, Inps))
 
     # ## OBJECTIVE
     prob = pp.LpProblem(
@@ -133,21 +134,18 @@ def solve_balancers(
 
     objective = pp.LpAffineExpression()
     # penalize number of intermediate splitters
-    objective += pp.lpSum(
-        100 * S[spl]
-        for spl in Splitters[n_s_ipinned:len(Splitters) - n_s_opinned]
-    )
+    if not exact_counts:
+        objective += 100 * S.sumit()
 
     # search-biasing objective terms
     if not exact_counts:
-        for ix, si in enumerate(Splitters):
+        for si in number(Splitters):
             # penalize "backflow"
-            for jx, sj in zip(range(ix), Splitters):
-                objective += (ix - jx) * Conn[si][sj]
+            for sj in range(ix):
+                objective += (si - sj) * Conn[si, sj]
             # penalize "jumps"
-            for jx in range(ix + 1, len(Splitters)):
-                sj = Splitters[jx]
-                objective += (jx - ix) * Conn[si][sj]
+            for sj in range(ix + 1, len(Splitters)):
+                objective += (sj - si) * Conn[si, sj]
 
     prob += objective
 
@@ -163,21 +161,24 @@ def solve_balancers(
     # ## CONSTRAINTS
     # # CHAPTER 0: FORMULATION RESTRICTIONS
     # 0.1: RESPECT PINS
-    for ix in range(n_s_ipinned):
-        prob += S[Splitters[ix]] == 1
-    for jx in range(n_s_opinned):
-        prob += S[Splitters[-jx - 1]] == 1
+    if not exact_counts:
+        (S[:n_s_ipinned] == 1).constrain(prob)
+        if n_s_opinned > 0:
+            (S[-n_s_opinned:] == 1).constrain(prob)
 
     # 0.2: UNPINNED SPLITTERS ARE ORDERED
     if not exact_counts:
-        for u, v in zip(Splitters[n_s_ipinned:],
-                        Splitters[n_s_ipinned + 1:n_s_opinned]):
+        for u, v in zip(
+                range(n_s_ipinned),
+                range(n_s_ipinned + 1, n_s_opinned),
+        ):
             prob += S[u] >= S[v]
 
     # 0.3: MINIMUM NUMBER OF SPLITTER
     # each input must have at least ceil(lg(N)) between it and any output
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
-    prob += pp.lpSum(S[u] for u in Splitters) >= min_spls
+    if not exact_counts:
+        (S.sum() >= min_spls).constrain(prob)
 
     # 0.4: SPLITTER SEPARATION THEOREMS
     # Theorem 3.
@@ -190,46 +191,34 @@ def solve_balancers(
     # pinning restrictions.
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        for si, so in product(Splitters[:n_s_ipinned],
-                              Splitters[-n_s_opinned:]):
-            prob += Conn[si][so] == 0
+        (Conn[:n_s_ipinned, -n_s_opinned:] == 0).constrain(prob)
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
     # Proof. As above.
     # NOTE this theorem can be expressed linearly because of fixed input
     # and output maps.
-    if N > 8:
+    # FIXME currently broken: the CO1 and CI1 sums can produce more
+    # than 1, thus excluding valid solutions in the constraint
+    if N > 80000:
         print('Solver/Info: invoking N > 8 separation theorem.')
-        CO0_base = np.zeros(len(Splitters), dtype=np.uint8)
-        CO0_base[-n_s_opinned:] = 1
         # CO0[s] = 1 if s -> output for any output
         # this is a constatn
-        CO0 = ndarray_to_dicts(CO0_base, (Splitters, ))
-
-        CI0_base = np.zeros(len(Splitters), dtype=np.uint8)
-        CI0_base[:n_s_ipinned] = 1
+        CO0 = np.zeros(len(Splitters), dtype=np.uint8)
+        CO0[-n_s_opinned:] = 1
         # CI0[s] = 1 if input -> s for any input
         # this is constant
-        CI0 = ndarray_to_dicts(CI0_base, (Splitters, ))
+        CI0 = np.zeros(len(Splitters), dtype=np.uint8)
+        CI0[:n_s_ipinned] = 1
 
-        # CO1[v] == 1 <=> exists w in Splitters : C[v][w] == 1 and CO0[w] == 1
-        CO1 = {
-            u: pp.lpSum(Conn[u][v] * CO0[v] for v in Splitters)
-            for u in Splitters
-        }
-
-        # CI1[v] == 1 <=> exists u in Splitters : C[u][v] == 1 and CI0[u] == 1
-        CI1 = {
-            v: pp.lpSum(Conn[u][v] * CI0[u] for u in Splitters)
-            for v in Splitters
-        }
-
-        # we have NOT (Conn[u, v] and CI0[u] == 1 and CO1[v] == 1) AND
-        # NOT (Conn[u, v] and CI1[u] == 1 and CO0[v] == 1)
-        for u, v in product(Splitters, Splitters):
-            prob += Conn[u][v] + CI0[u] + CO1[v] <= 2
-            prob += Conn[u][v] + CI1[u] + CO0[v] <= 2
+        # CO1[v] == 1 <=> exists v in Splitters : C[u, v] == 1 and CO0[v] == 1
+        CO1 = (Conn * CO0[None, :]).sum(axis=1)
+        # CI1[v] == 1 <=> exists u in Splitters : C[u, v] == 1 and CI0[u] == 1
+        CI1 = (Conn * CI0[:, None]).sum(axis=0)
+        # we have NOT (Conn[u, v] and CI0[u] == 1 and CO1[v] == 1)
+        (CI0[:, None] + Conn + CO1[None, :] <= 2).constrain(prob)
+        # and NOT (Conn[u, v] and CI1[u] == 1 and CO0[v] == 1)
+        (CI1[:, None] + Conn + CO0[None, :] <= 2).constrain(prob)
 
     # NOTE higher separation theorems are non-linear.
     # NOTE it can be approximated (lower-bound on the number of constraints)
@@ -239,73 +228,57 @@ def solve_balancers(
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED
     # 1.1.1 each input goes into exactly one splitter
-    # TODO these are redundant with i/o pinning enabled
-    for inp in Inps:
-        prob += pp.lpSum(Imap[inp][u] for u in Splitters) == 1
     # 1.1.2 each splitter receives from at most two inputs
-    for u in Splitters:
-        prob += pp.lpSum(Imap[inp][u] for inp in Inps) <= 2
+    # NOTE these are automatic with input pinning
 
     #  1.2 OUTPUTS UNIQUELY CONNECTED
     #  1.2.1 each output receives from exactly one splitter
-    for out in Outs:
-        prob += pp.lpSum(Omap[u][out] for u in Splitters) == 1
     #  1.2.2 each splitter goes to at most two outputs
-    for u in Splitters:
-        prob += pp.lpSum(Omap[u][out] for out in Outs) <= 2
+    # NOTE these are automatic with output pinning
 
-    for spl in Splitters:
-        outs_from_spl = pp.lpSum(Omap[spl][out] for out in Outs)
-        inps_into_spl = pp.lpSum(Imap[inp][spl] for inp in Inps)
+    out_from_spls = Omap.sum(axis=1)
+    inp_into_spls = Imap.sum(axis=0)
 
-        #  1.3 ENABLED SPLITTER OUPUTS WELL CONNECTED
-        outlinks = pp.lpSum(Conn[spl][v] for v in Splitters) + outs_from_spl
-        prob += outlinks <= 2 * S[spl]
-        prob += outlinks >= S[spl]
+    # 1.3 ENABLED SPLITTER OUPUTS WELL CONNECTED
+    (Conn.sum(axis=1) + out_from_spls <= 2 * S).constrain(prob, 'MaxOuts')
+    (Conn.sum(axis=1) + out_from_spls >= S).constrain(prob, 'MinOuts')
 
-        #  1.4 ENABLED SPLITTER INPUTS WELL CONNECTED
-        inlinks = pp.lpSum(Conn[u][spl] for u in Splitters) + inps_into_spl
-        prob += inlinks <= 2 * S[spl]
-        prob += inlinks >= S[spl]
+    # 1.4 ENABLED SPLITTER INPUTS WELL CONNECTED
+    (Conn.sum(axis=0) + inp_into_spls <= 2 * S).constrain(prob, 'MaxIns')
+    (Conn.sum(axis=0) + inp_into_spls >= S).constrain(prob, 'MinIns')
 
-        # 1.5 NO SELF-LOOPS
-        prob += Conn[spl][spl] == 0
+    # 1.5 NO SELF LOOPS
+    (np.diag(Conn) == 0).constrain(prob, 'NoSelfLoops')
 
     # # CHAPTER 2: GENERIC MAX-FLOW PROBLEM RESTRICTIONS
     # 2.1 RESPECT FLOW CAP
-    for u, v in product(Splitters, Splitters):
-        prob += pp.lpSum(Fs[u][v][t] for t in Inps) <= Conn[u][v]
+    (Fs.sum(axis=2) <= Conn).constrain(prob, 'FlowCap')
+    # for ux, vx in numprod(Splitters, Splitters):
+    #     prob += Fs[ux, vx].sumit() <= Conn[ux, vx]
 
     # 2.2 INFLOW EDGE CONDITIONS
-    for i, v, t in product(Inps, Splitters, Inps):
-        prob += Fi[i][v][t] == Imap[i][v] * int(i == t)
+    # forall i,v,t: F[i, v, t] == Imap[i, v] * 1[i == t]
+    (Fi == Imap[:, :, None] * np.eye(M)[:, None, :]).constrain(prob, 'InEdge')
 
     # 2.3 OUTFLOW EDGE CONDITIONS
-    for o, v, t in product(Outs, Splitters, Inps):
-        prob += N * Fo[v][o][t] == Omap[v][o]
+    # forall v,o,t: Fo[v, o, t] == Omap[v, o] / N
+    (N * Fo == Omap[..., None]).constrain(prob, 'OutEdge')
 
-    # 2.2 PROPER FLOW
-    for u, v, t in product(Splitters, Splitters, Inps):
-        prob += Fs[u][v][t] >= 0
-    for i, v, t in product(Inps, Splitters, Inps):
-        prob += Fi[i][v][t] >= 0
-    for o, v, t in product(Outs, Splitters, Inps):
-        prob += Fo[v][o][t] >= 0
+    # 2.4 PROPER FLOW
+    (Fs >= 0).constrain(prob, 'ProperFlowS')
+    (Fi >= 0).constrain(prob, 'ProperFlowI')
+    (Fo >= 0).constrain(prob, 'ProperFlowO')
 
-    for spl, t in product(Splitters, Inps):
-        # 2.3 UNIFORM INCOMPRESSIBILITY
-        in_s = pp.lpSum(Fs[u][spl][t] for u in Splitters)
-        in_i = pp.lpSum(Fi[i][spl][t] for i in Inps)
-        out_s = pp.lpSum(Fs[spl][w][t] for w in Splitters)
-        out_o = pp.lpSum(Fo[spl][o][t] for o in Outs)
+    # 2.5 INCOMPRESSIBILITY
+    inflows = Fs.sum(axis=0) + Fi.sum(axis=0)  # (spls, types)
+    outflows = Fs.sum(axis=1) + Fo.sum(axis=1)  # (spls, types)
+    (inflows == outflows).constrain(prob, 'Incompressibility')
 
-        prob += in_s + in_i == out_s + out_o
-
-        # 3.1 EQUAL SPLITTING
-        for w in Splitters:
-            prob += 2 * Fs[spl][w][t] <= in_s + in_i
-        for o in Outs:
-            prob += 2 * Fo[spl][o][t] <= in_s + in_i
+    # 2.6 EQUAL SPLITTING
+    # forall w: 2 * Fs[s, w, t] <= inflow[s, t]
+    (2 * Fs <= inflows[:, None, :]).constrain(prob, 'SplittingS')
+    # forall w: 2 * Fo[s, o, t] <= inflow[s, t]
+    (2 * Fo <= inflows[:, None, :]).constrain(prob, 'SplittingO')
 
     # ## SOLVING
     # #
@@ -314,16 +287,12 @@ def solve_balancers(
     if 'Infeasible' in pp.LpStatus[prob.status]:
         raise Infeasible
 
-    adjmat = dicts_to_ndarray(Conn, (Splitters, Splitters))
-    keep_rows = np.where(dicts_to_ndarray(S, (Splitters, )) > 0)[0]
-    # keep_rows = np.where(adjmat.sum(axis=0) + adjmat.sum(axis=1) != 0)[0]
-    adjmat = adjmat[np.ix_(keep_rows, keep_rows)]
+    keep_rows = np.where(get_lparr_value(S) > 0)[0]
 
-    imap = dicts_to_ndarray(Imap, (Inps, Splitters))[:, keep_rows]
-    omap = dicts_to_ndarray(Omap, (Splitters, Outs))[keep_rows]
+    adjmat = get_lparr_value(Conn)[np.ix_(keep_rows, keep_rows)]
     labels = np.array(Splitters)[keep_rows]
 
-    return imap, omap, adjmat, labels
+    return Imap[:, keep_rows], Omap[keep_rows], adjmat, labels
 
 
 def draw_solution(
