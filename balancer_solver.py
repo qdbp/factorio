@@ -24,8 +24,18 @@ def lowerbound_splitters(M: int, N: int) -> int:
     Guesses a lower bound on the number of splitters needed for an M-N balancer
     '''
 
-    # must place at least ceil(lg(N)) splitters between every input and output
-    return ceil(np.log2(N)) * ceil(M / 2)
+    # special case
+    if M == 1 and N == 1:
+        return 0
+
+    H = ceil(np.log2(N))
+    W = ceil(M / 2)
+
+    def min_by_height(h: int):
+        return max(W, ceil(N / (2**(H - h))))
+
+    return sum(min_by_height(h) for h in range(H))
+    # return H * W
 
 
 def solve_balancers(
@@ -33,6 +43,7 @@ def solve_balancers(
         N: int,
         max_spls: int,
         min_spls: int = 0,
+        max_backedges: int = None,
         debug=False,
         exact_counts=False,
         solver='coin',
@@ -61,21 +72,21 @@ def solve_balancers(
             'lower than the max given'
         )
 
-    # special case needed for fixed omaps
+    # special case needed for fixed Omap.
     if N == 2:
         max_spls = 1
 
     # number of pinned input splitters, disjoint from output splitters
-    n_s_ipinned = ceil(M / 2)
+    n_s_ipinned_tot = n_s_ipinned_0 = ceil(M / 2)
 
     # number of pinned output splitters, disjoint from input splitters
     # if N > 2, outputs can't be connected straight to an input splitter.
     # This is the first separation theorem (see below)
-    n_s_opinned = ceil(N / 2) if N > 2 else 0
+    n_s_opinned_tot = n_s_opinned_0 = ceil(N / 2) if N > 2 else 0
 
     # we must have at least the input and output pinned splitters
     # this can be better than the previous lower bound for some M, N
-    min_spls = max(min_spls, n_s_ipinned + n_s_opinned)
+    min_spls = max(min_spls, n_s_ipinned_0 + n_s_opinned_0)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -117,113 +128,121 @@ def solve_balancers(
     for ix in range(N):
         Omap[len(Splitters) - 1 - ix // 2, ix] = 1
 
-    print(Imap)
-    print(Omap)
-
     # input flows
     Fi = lparray.create("Fi", (Inps, Splitters, Inps))
     # output map: Omap[u, t] == 1 <=> splitter u flows into output t
     # output flows
     Fo = lparray.create("Fo", (Splitters, Outs, Inps))
 
-    # ## OBJECTIVE
     prob = pp.LpProblem(
         name="solve_balancer",
         sense=pp.LpMinimize,
     )
-
-    objective = pp.LpAffineExpression()
-    # penalize number of intermediate splitters
-    if not exact_counts:
-        objective += 100 * S.sumit()
-
-    # search-biasing objective terms
-    if not exact_counts:
-        for si in number(Splitters):
-            # penalize "backflow"
-            for sj in range(ix):
-                objective += (si - sj) * Conn[si, sj]
-            # penalize "jumps"
-            for sj in range(ix + 1, len(Splitters)):
-                objective += (sj - si) * Conn[si, sj]
-
-    prob += objective
 
     if not exact_counts:
         print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
     else:
         print(f'Solver/Info: solving with exactly {max_spls} splitters')
     print(
-        f'Solver/Info: {n_s_ipinned} input pinned; '
-        f'{n_s_opinned} output pinned'
+        f'Solver/Info: {n_s_ipinned_0} input pinned; '
+        f'{n_s_opinned_0} output pinned'
     )
+    if max_backedges is not None:
+        print(f'Solver/Info: {max_backedges} max backedges')
 
     # ## CONSTRAINTS
     # # CHAPTER 0: FORMULATION RESTRICTIONS
-    # 0.1: RESPECT PINS
-    if not exact_counts:
-        (S[:n_s_ipinned] == 1).constrain(prob)
-        if n_s_opinned > 0:
-            (S[-n_s_opinned:] == 1).constrain(prob)
-
-    # 0.2: UNPINNED SPLITTERS ARE ORDERED
-    if not exact_counts:
-        for u, v in zip(
-                range(n_s_ipinned),
-                range(n_s_ipinned + 1, n_s_opinned),
-        ):
-            prob += S[u] >= S[v]
-
-    # 0.3: MINIMUM NUMBER OF SPLITTER
+    # 0.1: MINIMUM NUMBER OF SPLITTERS
     # each input must have at least ceil(lg(N)) between it and any output
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     if not exact_counts:
-        (S.sum() >= min_spls).constrain(prob)
+        (S.sum() >= min_spls).constrain(prob, 'MinSplitters')
 
-    # 0.4: SPLITTER SEPARATION THEOREMS
+    # 0.2: SPLITTER SEPARATION THEOREMS
+    # We adopt the following formalism:
+    # Define I0 = {s | s is ipinned}, O0 = {s | s is opinned}
+    # I1 = {s | exists u in I0: C[u, s] == 1 and s not in I0}
+    # O1 = {s | exists w in O0: C[s, w] == 1 and s not in O0}
+    # We have trivially that I0, I1, ... are pairwise disjoint, same for On
+    # for N > 2, we have I0 disjoint O0, hence we have separate pinsets
+    #
     # Theorem 3.
     # If N > 4, an input splitter cannot be connected to an output splitter.
     # Proof.
     # The fraction of item i on output o under a subgraph like
     # i -> s0 -> s1 -> o is at least 1 / 4. Balancing requires that it
     # be 1 / N < 1 / 4.  Therefore such a subgraph cannot exist.
-    # NOTE the N > 2 splitter separation theorm is implied by the splitter
-    # pinning restrictions.
+    #
+    # Therefore, N > 4 => Im disjoint On if m + n < 2. Thus any destination
+    # nodes of I0 (by definition in I1) cannot flow into the output, since any
+    # nodes flowing into the output are by definition in O0.
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        (Conn[:n_s_ipinned, -n_s_opinned:] == 0).constrain(prob)
+        print(f'Solver/Info: {n_s_opinned_0 * n_s_ipinned_0} entries zeroed.')
+
+        (Conn[:n_s_ipinned_0, -n_s_opinned_0:] == 0).constrain(prob, "Sep4")
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
     # Proof. As above.
-    # NOTE this theorem can be expressed linearly because of fixed input
-    # and output maps.
-    # FIXME currently broken: the CO1 and CI1 sums can produce more
-    # than 1, thus excluding valid solutions in the constraint
-    if N > 80000:
-        print('Solver/Info: invoking N > 8 separation theorem.')
-        # CO0[s] = 1 if s -> output for any output
-        # this is a constatn
-        CO0 = np.zeros(len(Splitters), dtype=np.uint8)
-        CO0[-n_s_opinned:] = 1
-        # CI0[s] = 1 if input -> s for any input
-        # this is constant
-        CI0 = np.zeros(len(Splitters), dtype=np.uint8)
-        CI0[:n_s_ipinned] = 1
+    #
+    # From this it follows Im disjoint On if m + n < 3.
+    #
+    # I believe a linear constraint for this theorem exactly does not exist.
+    # However, we can allocate lower bounds on the size of blocks on I1 and I2
+    # |I1| >= I0 -- since the flow cannot be compressed.
+    # |O1| >= max(|I0|, ceil(|O0| / 2)) -- since flow cannot be
+    # compressed and splitters fan out at most by 2
+    if N > 8:
+        n_s_ipinned_1 = n_s_ipinned_0
+        n_s_opinned_1 = max(n_s_ipinned_1, ceil(n_s_opinned_0 / 2))
 
-        # CO1[v] == 1 <=> exists v in Splitters : C[u, v] == 1 and CO0[v] == 1
-        CO1 = (Conn * CO0[None, :]).sum(axis=1)
-        # CI1[v] == 1 <=> exists u in Splitters : C[u, v] == 1 and CI0[u] == 1
-        CI1 = (Conn * CI0[:, None]).sum(axis=0)
-        # we have NOT (Conn[u, v] and CI0[u] == 1 and CO1[v] == 1)
-        (CI0[:, None] + Conn + CO1[None, :] <= 2).constrain(prob)
-        # and NOT (Conn[u, v] and CI1[u] == 1 and CO0[v] == 1)
-        (CI1[:, None] + Conn + CO0[None, :] <= 2).constrain(prob)
+        n_s_ipinned_tot += n_s_ipinned_1
+        n_s_opinned_tot += n_s_opinned_1
 
-    # NOTE higher separation theorems are non-linear.
-    # NOTE it can be approximated (lower-bound on the number of constraints)
-    # by "higher order pinning" similar to that implicit in the lowerbound
-    # calculation
+        print('Solver/Info: invoking N > 8 separation theorem:')
+        print(f'Solver/Info: {n_s_ipinned_1} I1 pinned.')
+        print(f'Solver/Info: {n_s_opinned_1} O1 pinned.')
+        print(
+            f'Solver/Info: {n_s_ipinned_1 * n_s_opinned_0 * 2} entries zeroed.'
+        )
+
+        # lower bound constraint: each element in the I1 lower bound
+        # must receive at least one connection from an element of I0
+        (Conn[:n_s_ipinned_0, n_s_ipinned_0:n_s_ipinned_tot].sum(axis=0) >=
+         1).constrain(prob, "I1def")
+
+        # lower bound constraint: each element in the O1 lower bound
+        # must send at least one connection to an element of O0
+        (
+            Conn[-n_s_opinned_tot:-n_s_opinned_0, -n_s_opinned_0:].sum(axis=1)
+            >= 1
+        ).constrain(prob, "O1def")
+
+        # I1 disjoint O1 (lower bound)
+        # NOTE implied by separate indices
+
+        # I2 disjoint 00
+        (Conn[n_s_ipinned_0:n_s_ipinned_tot, -n_s_opinned_0:] == 0
+         ).constrain(prob, "Sep8a")
+
+        # I0 disjoint O2
+        (Conn[:n_s_ipinned_0, -n_s_opinned_tot:n_s_opinned_0] == 0
+         ).constrain(prob, "Sep8b")
+
+    # 0.3: ORDERED UNPINNED SPLITTERS
+    if not exact_counts:
+        for u, v in zip(
+                range(n_s_ipinned_tot),
+                range(n_s_ipinned_tot + 1, len(Splitters) - n_s_opinned_tot),
+        ):
+            prob += S[u] >= S[v]
+
+    # 0.4: RESPECT PINS
+    if not exact_counts:
+        (S[:n_s_ipinned_tot] == 1).constrain(prob)
+        if n_s_opinned_tot > 0:
+            (S[-n_s_opinned_tot:] == 1).constrain(prob)
 
     # # CHAPTER 1: ADJACENCY RESTRICTIONS
     # 1.1 INPUTS WELL CONNECTED
@@ -250,11 +269,37 @@ def solve_balancers(
     # 1.5 NO SELF LOOPS
     (np.diag(Conn) == 0).constrain(prob, 'NoSelfLoops')
 
+    # Theorem 4:
+    # Every solution has a linearization in which no node has two backedges.
+    #
+    # Lemma 4.a: Every useful node must have a descendant in the output set.
+    # Proof. Either the node is part of a cycle with no inputs, in which case
+    # it is disallowed; or it is part of a cycle with one input and no outputs
+    # which violates incompressibility; or it has a descendant output.
+    #
+    # Proof of theorem.
+    # Consider an arbitary linear order of the graph G with outputs at the end.
+    # Split the list of nodes at the lowest index k such that every node with
+    # index > k has at least one forward edge. Call these halves Gl and Gh.
+    # This is trivially possible since some nodes must be connected to the
+    # outputs. By construction the node at k has two backedges. By lemma 4.a
+    # we can trace either one of these to find a node at j < k with a child in
+    # Gh. (Noting that for any node != k, (has child < k, has child in Gh) are
+    # collectively exhaustive). Now swap nodes at k and j. We note now that
+    # |Gl| has shrunk by at least 1 since the new node at k, picked to have a
+    # child in Gh, has at most one backedge. We repeat this procedure until
+    # |Gl| == 0.
+    #
+    # 1.6 BACKEDGE LIMITS
+    if max_backedges is not None:
+        mask = np.tril(np.ones(max_spls, max_spls), k=-1)
+        ((Conn * mask).sum(axis=1) <= 1).constrain(prob, "LinearizationL")
+        # this is redundant with the former, but let's baby the solver
+        ((Conn * mask.T).sum(axis=1) >= 1).constrain(prob, "LinearizationU")
+
     # # CHAPTER 2: GENERIC MAX-FLOW PROBLEM RESTRICTIONS
     # 2.1 RESPECT FLOW CAP
     (Fs.sum(axis=2) <= Conn).constrain(prob, 'FlowCap')
-    # for ux, vx in numprod(Splitters, Splitters):
-    #     prob += Fs[ux, vx].sumit() <= Conn[ux, vx]
 
     # 2.2 INFLOW EDGE CONDITIONS
     # forall i,v,t: F[i, v, t] == Imap[i, v] * 1[i == t]
@@ -279,6 +324,27 @@ def solve_balancers(
     (2 * Fs <= inflows[:, None, :]).constrain(prob, 'SplittingS')
     # forall w: 2 * Fo[s, o, t] <= inflow[s, t]
     (2 * Fo <= inflows[:, None, :]).constrain(prob, 'SplittingO')
+
+    # ## OBJECTIVE
+    # #
+    objective = pp.LpAffineExpression()
+
+    # penalize number of intermediate splitters
+    if not exact_counts:
+        objective += 1000 * S.sumit()
+
+    # search-biasing objective terms
+    # XXX ideally these will be subsumed into the layout problem
+    if not exact_counts:
+        for si in number(Splitters):
+            # penalize "backjumps"
+            for sj in range(ix):
+                objective += (si - sj) * Conn[si, sj]
+            # penalize "jumps"
+            for sj in range(ix + 1, len(Splitters)):
+                objective += (sj - si) * Conn[si, sj]
+
+    prob += objective
 
     # ## SOLVING
     # #
@@ -337,8 +403,7 @@ def draw_solution(
         )
 
     values = ['red'] * n_inps + ['black'] * n_spls + ['blue'] * n_outs
-    # nx.draw_graphviz(g, node_color=values)
-    # plt.savefig('graph.png')
+
     for ndx, (_, attrs) in enumerate(g.nodes(data=True)):
         attrs['fillcolor'] = attrs['color'] = values[ndx]
 
@@ -364,6 +429,12 @@ def main():
         default=0,
         help='minimum number of splitters to consider'
     )
+    parser.add_argument(
+        '--maxb',
+        type=int,
+        default=None,
+        help='max number of backedges',
+    )
     # parser.add_argument(
     #     'm21', type=int, help='max number of 2->1 splitters to consider'
     # )
@@ -384,8 +455,9 @@ def main():
     args = parser.parse_args(sys.argv[1:])
 
     graphname = (
-        f'bal_{args.ni}-{args.no}-{"x" if args.exact else "le"}-'
-        f'{args.maxs}'
+        f'bal_{args.ni}-{args.no}'
+        f'{"-ge + str(args.mins)" if args.exact else ""}'
+        f'{"-mbe + str(args.maxb)" if args.maxb else ""}'
     )
     graphname = str(in_sol_dir(SOL_SUBDIR + graphname))
 
@@ -396,11 +468,13 @@ def main():
             args.no,
             max_spls=args.maxs,
             min_spls=args.mins,
+            max_backedges=args.maxb,
             exact_counts=args.exact,
             solver=args.solver,
         )
-    except Infeasible:
-        print(f'No feasible solution within the given splitter limits.')
+    except (Infeasible, IllSpecified) as e:
+        print(f'No feasible solution within the given splitter limits:')
+        print(str(e))
         return
 
     draw_solution(
