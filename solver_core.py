@@ -35,16 +35,42 @@ def in_sol_dir(fn: str) -> Path:
     return SOLDIR.joinpath(fn)
 
 
-def get_solver(which='coin', threads: int = None):
+SOLVER_FALLBACK = ['gurobi', 'coin', 'glpk']
+
+
+def get_solver(which='coin', threads: int = None, _fallback=None):
+    threads = threads or os.cpu_count() or 1
     if which == 'coin':
         return pp.solvers.COIN_CMD(
             msg=1,
-            threads=(threads or os.cpu_count() or 1),
+            threads=threads,
         )
     if which == 'coinmp':
-        return pp.solvers.COINMP_DLL()
+        solver = pp.solvers.COINMP_DLL()
     elif which == 'glpk':
-        return pp.solvers.GLPK()
+        solver = pp.solvers.GLPK()
+    elif which == 'gurobi':
+        solver = pp.solvers.GUROBI(
+            threads=threads,
+            display_interval=60,
+        )
+    else:
+        solver = None
+
+    if solver is not None and solver.available():
+        return solver
+
+    if _fallback is None:
+        _fallback = SOLVER_FALLBACK.copy()
+    _fallback.remove(which)
+    if not _fallback:
+        print('Could not get a solver!')
+        return None
+    print(
+        f'Solver: {which} solver is not available. '
+        f'Falling back on {_fallback[0]}'
+    )
+    return get_solver(which=_fallback[0], threads=threads, _fallback=_fallback)
 
 
 def dicts_to_ndarray(
@@ -185,9 +211,33 @@ class lparray(np.ndarray):
 
         _rworker(prob, self, name)
 
+    def logical_clip(self, prob: pp.LpProblem, bigM=10000) -> lparray:
+        '''
+        Assumes self is integer >= 0.
 
-def get_lparr_value(lparray: lparray):
-    return np.vectorize(lambda x: pp.value(x))(lparray).view(np.ndarray)
+        Returns an array of the same shape as self containing
+            z_... = max(self_..., 1)
+        using the big M method
+        '''
+
+        if self.ndim == 0:
+            basename = self.item().name
+        else:
+            basename = self[(0, ) * self.ndim].split('(')[:-1].join('(')
+
+        clipname = basename + '_lclipped'
+
+        z = self.__class__.create(
+            clipname, [range(x) for x in self.shape], 0, 1, pp.LpBinary
+        )
+
+        (self >= z).constrain(prob, clipname + '_limit')
+        (self <= bigM * z).constrain(prob, clipname + '_reach')
+
+        return z
+
+    def extract_values(self) -> np.ndarray:
+        return np.vectorize(lambda x: pp.value(x))(self).view(np.ndarray)
 
 
 if __name__ == '__main__':

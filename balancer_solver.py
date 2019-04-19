@@ -42,8 +42,7 @@ def solve_balancers(
         M: int,
         N: int,
         max_spls: int,
-        min_spls: int = 0,
-        max_backedges: int = None,
+        min_spls: int,
         debug=False,
         exact_counts=False,
         solver='coin',
@@ -77,16 +76,16 @@ def solve_balancers(
         max_spls = 1
 
     # number of pinned input splitters, disjoint from output splitters
-    n_s_ipinned_tot = n_s_ipinned_0 = ceil(M / 2)
+    n_s_i_tot = n_s_i_0 = ceil(M / 2)
 
     # number of pinned output splitters, disjoint from input splitters
     # if N > 2, outputs can't be connected straight to an input splitter.
     # This is the first separation theorem (see below)
-    n_s_opinned_tot = n_s_opinned_0 = ceil(N / 2) if N > 2 else 0
+    n_s_o_tot = n_s_o_0 = ceil(N / 2) if N > 2 else 0
 
     # we must have at least the input and output pinned splitters
     # this can be better than the previous lower bound for some M, N
-    min_spls = max(min_spls, n_s_ipinned_0 + n_s_opinned_0)
+    min_spls = max(min_spls, n_s_i_0 + n_s_o_0)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -103,7 +102,9 @@ def solve_balancers(
     Conn = lparray.create("C", (Splitters, Splitters), 0, 1, pp.LpBinary)
     # internal flows
     # Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
-    Fs = lparray.create("Fs", (Splitters, Splitters, Inps))
+    Fs = lparray.create(
+        "Fs", (Splitters, Splitters, Inps), 0., 1., pp.LpContinuous
+    )
 
     # Theorem 1. We can pack all inputs without loss of generality.
     # i.e. We can have inputs 0, 1 -> splitter 0, 1, 2 -> splitter 2, etc.
@@ -129,36 +130,28 @@ def solve_balancers(
         Omap[len(Splitters) - 1 - ix // 2, ix] = 1
 
     # input flows
-    Fi = lparray.create("Fi", (Inps, Splitters, Inps))
+    Fi = lparray.create("Fi", (Inps, Splitters, Inps), 0., 1., pp.LpContinuous)
     # output map: Omap[u, t] == 1 <=> splitter u flows into output t
     # output flows
-    Fo = lparray.create("Fo", (Splitters, Outs, Inps))
+    Fo = lparray.create("Fo", (Splitters, Outs, Inps), 0., 1., pp.LpContinuous)
 
-    prob = pp.LpProblem(
-        name="solve_balancer",
-        sense=pp.LpMinimize,
-    )
+    prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
     if not exact_counts:
         print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
     else:
         print(f'Solver/Info: solving with exactly {max_spls} splitters')
-    print(
-        f'Solver/Info: {n_s_ipinned_0} input pinned; '
-        f'{n_s_opinned_0} output pinned'
-    )
-    if max_backedges is not None:
-        print(f'Solver/Info: {max_backedges} max backedges')
+    print(f'Solver/Info: {n_s_i_0} input pinned; ' f'{n_s_o_0} output pinned')
 
     # ## CONSTRAINTS
-    # # CHAPTER 0: FORMULATION RESTRICTIONS
-    # 0.1: MINIMUM NUMBER OF SPLITTERS
+    # # CHAPTER 0: CONNECTIVITY RESTRICTIONS
+    # 0.0: MINIMUM NUMBER OF SPLITTERS
     # each input must have at least ceil(lg(N)) between it and any output
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     if not exact_counts:
         (S.sum() >= min_spls).constrain(prob, 'MinSplitters')
 
-    # 0.2: SPLITTER SEPARATION THEOREMS
+    # 0.1: SPLITTER SEPARATION THEOREMS
     # We adopt the following formalism:
     # Define I0 = {s | s is ipinned}, O0 = {s | s is opinned}
     # I1 = {s | exists u in I0: C[u, s] == 1 and s not in I0}
@@ -176,11 +169,13 @@ def solve_balancers(
     # Therefore, N > 4 => Im disjoint On if m + n < 2. Thus any destination
     # nodes of I0 (by definition in I1) cannot flow into the output, since any
     # nodes flowing into the output are by definition in O0.
+    #
+    # 0.1.0 N > 4 SEPARATION THEOREM
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        print(f'Solver/Info: {n_s_opinned_0 * n_s_ipinned_0} entries zeroed.')
+        print(f'Solver/Info: {n_s_o_0 * n_s_i_0} entries zeroed.')
 
-        (Conn[:n_s_ipinned_0, -n_s_opinned_0:] == 0).constrain(prob, "Sep4")
+        (Conn[:n_s_i_0, -n_s_o_0:] == 0).constrain(prob, "Sep4")
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
@@ -193,80 +188,72 @@ def solve_balancers(
     # |I1| >= I0 -- since the flow cannot be compressed.
     # |O1| >= max(|I0|, ceil(|O0| / 2)) -- since flow cannot be
     # compressed and splitters fan out at most by 2
+    #
+    # 0.1.1 N > 8 SEPARATION THEOREM
     if N > 8:
-        n_s_ipinned_1 = n_s_ipinned_0
-        n_s_opinned_1 = max(n_s_ipinned_1, ceil(n_s_opinned_0 / 2))
+        n_s_i_1 = n_s_i_0
+        n_s_o_1 = max(n_s_i_1, ceil(n_s_o_0 / 2))
 
-        n_s_ipinned_tot += n_s_ipinned_1
-        n_s_opinned_tot += n_s_opinned_1
+        n_s_i_tot += n_s_i_1
+        n_s_o_tot += n_s_o_1
 
         print('Solver/Info: invoking N > 8 separation theorem:')
-        print(f'Solver/Info: {n_s_ipinned_1} I1 pinned.')
-        print(f'Solver/Info: {n_s_opinned_1} O1 pinned.')
-        print(
-            f'Solver/Info: {n_s_ipinned_1 * n_s_opinned_0 * 2} entries zeroed.'
-        )
+        print(f'Solver/Info: {n_s_i_1} I1 pinned. ', end='')
+        print(f'{n_s_o_1} O1 pinned. ', end='')
 
         # lower bound constraint: each element in the I1 lower bound
         # must receive at least one connection from an element of I0
-        (Conn[:n_s_ipinned_0, n_s_ipinned_0:n_s_ipinned_tot].sum(axis=0) >=
+        (Conn[:n_s_i_0, n_s_i_0:n_s_i_tot].sum(axis=0) >=
          1).constrain(prob, "I1def")
 
         # lower bound constraint: each element in the O1 lower bound
         # must send at least one connection to an element of O0
-        (
-            Conn[-n_s_opinned_tot:-n_s_opinned_0, -n_s_opinned_0:].sum(axis=1)
-            >= 1
-        ).constrain(prob, "O1def")
+        (Conn[-n_s_o_tot:-n_s_o_0, -n_s_o_0:].sum(axis=1) >=
+         1).constrain(prob, "O1def")
 
         # I1 disjoint O1 (lower bound)
         # NOTE implied by separate indices
 
-        # I2 disjoint 00
-        (Conn[n_s_ipinned_0:n_s_ipinned_tot, -n_s_opinned_0:] == 0
-         ).constrain(prob, "Sep8a")
+        # I2 disjoint O0
+        (Conn[n_s_i_0:n_s_i_tot, -n_s_o_0:] == 0).constrain(prob, "Sep8a")
 
         # I0 disjoint O2
-        (Conn[:n_s_ipinned_0, -n_s_opinned_tot:n_s_opinned_0] == 0
-         ).constrain(prob, "Sep8b")
+        (Conn[:n_s_i_0, -n_s_o_tot:n_s_o_0] == 0).constrain(prob, "Sep8b")
 
-    # 0.3: ORDERED UNPINNED SPLITTERS
+        print(f'{n_s_i_1 * n_s_o_0 + n_s_i_0 * n_s_o_1} entries zeroed.')
+
+    assert min_spls >= n_s_o_tot + n_s_i_tot
+
+    # 0.2: RESPECT PINS
     if not exact_counts:
-        for u, v in zip(
-                range(n_s_ipinned_tot),
-                range(n_s_ipinned_tot + 1, len(Splitters) - n_s_opinned_tot),
-        ):
-            prob += S[u] >= S[v]
+        (S[:n_s_i_tot] == 1).constrain(prob)
+        if n_s_o_tot > 0:
+            (S[-n_s_o_tot:] == 1).constrain(prob)
 
-    # 0.4: RESPECT PINS
-    if not exact_counts:
-        (S[:n_s_ipinned_tot] == 1).constrain(prob)
-        if n_s_opinned_tot > 0:
-            (S[-n_s_opinned_tot:] == 1).constrain(prob)
+        # 0.3 UNPINNED SPLITTERS ARE ORDERED
+        Sl = S[n_s_i_tot:max_spls - n_s_o_tot - 1]
+        Su = S[n_s_i_tot + 1:max_spls - n_s_o_tot]
+        (Sl >= Su).constrain(prob, "UnpinnedSplitterOrder")
 
-    # # CHAPTER 1: ADJACENCY RESTRICTIONS
-    # 1.1 INPUTS WELL CONNECTED
-    # 1.1.1 each input goes into exactly one splitter
-    # 1.1.2 each splitter receives from at most two inputs
-    # NOTE these are automatic with input pinning
+        print(f'Solver/Info: {len(Sl) + 1} unpinned splitters.')
 
-    #  1.2 OUTPUTS UNIQUELY CONNECTED
-    #  1.2.1 each output receives from exactly one splitter
-    #  1.2.2 each splitter goes to at most two outputs
-    # NOTE these are automatic with output pinning
+        free_locked = max(0, min_spls - n_s_i_tot - n_s_o_tot)
+        if free_locked > 0:
+            print(f'Solver/Info: {free_locked} unpinned splitters are locked')
+            (Sl[:free_locked] == 1).constrain(prob, "FreeLocked")
 
     out_from_spls = Omap.sum(axis=1)
     inp_into_spls = Imap.sum(axis=0)
 
-    # 1.3 ENABLED SPLITTER OUPUTS WELL CONNECTED
+    # 0.4 ENABLED SPLITTER OUPUTS WELL CONNECTED
     (Conn.sum(axis=1) + out_from_spls <= 2 * S).constrain(prob, 'MaxOuts')
     (Conn.sum(axis=1) + out_from_spls >= S).constrain(prob, 'MinOuts')
 
-    # 1.4 ENABLED SPLITTER INPUTS WELL CONNECTED
+    # 0.5 ENABLED SPLITTER INPUTS WELL CONNECTED
     (Conn.sum(axis=0) + inp_into_spls <= 2 * S).constrain(prob, 'MaxIns')
     (Conn.sum(axis=0) + inp_into_spls >= S).constrain(prob, 'MinIns')
 
-    # 1.5 NO SELF LOOPS
+    # 0.6 NO SELF LOOPS
     (np.diag(Conn) == 0).constrain(prob, 'NoSelfLoops')
 
     # Theorem 4:
@@ -290,39 +277,40 @@ def solve_balancers(
     # child in Gh, has at most one backedge. We repeat this procedure until
     # |Gl| == 0.
     #
-    # 1.6 BACKEDGE LIMITS
-    if max_backedges is not None:
-        mask = np.tril(np.ones(max_spls, max_spls), k=-1)
-        ((Conn * mask).sum(axis=1) <= 1).constrain(prob, "LinearizationL")
-        # this is redundant with the former, but let's baby the solver
-        ((Conn * mask.T).sum(axis=1) >= 1).constrain(prob, "LinearizationU")
+    # 0.7 NO DOUBLE BACKEDGES
+    mask = np.tril(np.ones((max_spls, max_spls), dtype=np.uint8), k=-1)
+    ((Conn * mask).sum(axis=1) <= 1).constrain(prob, "NoDoubleBackedges")
+    # XXX we can alternatively apply this logic to nodes with two "backinputs"
+    # essentially reversing the arrows. But can we conclude both
+    # simulateneously, and say that no node has eight two backedges or two
+    # backinputs? I suspect no...
 
-    # # CHAPTER 2: GENERIC MAX-FLOW PROBLEM RESTRICTIONS
-    # 2.1 RESPECT FLOW CAP
+    # # CHAPTER 1: FLOW CONSTRAINTS
+    # 1.0 RESPECT FLOW CAP
     (Fs.sum(axis=2) <= Conn).constrain(prob, 'FlowCap')
 
-    # 2.2 INFLOW EDGE CONDITIONS
+    # 1.1 INFLOW EDGE CONDITIONS
     # forall i,v,t: F[i, v, t] == Imap[i, v] * 1[i == t]
     (Fi == Imap[:, :, None] * np.eye(M)[:, None, :]).constrain(prob, 'InEdge')
 
-    # 2.3 OUTFLOW EDGE CONDITIONS
+    # 1.2 OUTFLOW EDGE CONDITIONS
     # forall v,o,t: Fo[v, o, t] == Omap[v, o] / N
     (N * Fo == Omap[..., None]).constrain(prob, 'OutEdge')
 
-    # 2.4 PROPER FLOW
+    # 1.3 PROPER FLOW
     (Fs >= 0).constrain(prob, 'ProperFlowS')
     (Fi >= 0).constrain(prob, 'ProperFlowI')
     (Fo >= 0).constrain(prob, 'ProperFlowO')
 
-    # 2.5 INCOMPRESSIBILITY
+    # 1.4 INCOMPRESSIBILITY
     inflows = Fs.sum(axis=0) + Fi.sum(axis=0)  # (spls, types)
     outflows = Fs.sum(axis=1) + Fo.sum(axis=1)  # (spls, types)
     (inflows == outflows).constrain(prob, 'Incompressibility')
 
-    # 2.6 EQUAL SPLITTING
-    # forall w: 2 * Fs[s, w, t] <= inflow[s, t]
+    # 1.5 EQUAL SPLITTING
+    # forall s,w,t: 2 * Fs[s, w, t] <= inflow[s, t]
     (2 * Fs <= inflows[:, None, :]).constrain(prob, 'SplittingS')
-    # forall w: 2 * Fo[s, o, t] <= inflow[s, t]
+    # forall s,o,t: 2 * Fo[s, o, t] <= inflow[s, t]
     (2 * Fo <= inflows[:, None, :]).constrain(prob, 'SplittingO')
 
     # ## OBJECTIVE
@@ -335,14 +323,13 @@ def solve_balancers(
 
     # search-biasing objective terms
     # XXX ideally these will be subsumed into the layout problem
-    if not exact_counts:
-        for si in number(Splitters):
-            # penalize "backjumps"
-            for sj in range(ix):
-                objective += (si - sj) * Conn[si, sj]
-            # penalize "jumps"
-            for sj in range(ix + 1, len(Splitters)):
-                objective += (sj - si) * Conn[si, sj]
+    for si in number(Splitters):
+        # penalize "backjumps"
+        for sj in range(ix):
+            objective += (si - sj) * Conn[si, sj]
+        # penalize "jumps"
+        for sj in range(ix + 1, max_spls):
+            objective += (sj - si) * Conn[si, sj]
 
     prob += objective
 
@@ -353,12 +340,18 @@ def solve_balancers(
     if 'Infeasible' in pp.LpStatus[prob.status]:
         raise Infeasible
 
-    keep_rows = np.where(get_lparr_value(S) > 0)[0]
+    optimal = 'Optimal' == pp.LpStatus[prob.status]
+    print(optimal)
+
+    if not exact_counts:
+        keep_rows = np.where(get_lparr_value(S) > 0)[0]
+    else:
+        keep_rows = np.arange(max_spls, dtype=np.int32)
 
     adjmat = get_lparr_value(Conn)[np.ix_(keep_rows, keep_rows)]
     labels = np.array(Splitters)[keep_rows]
 
-    return Imap[:, keep_rows], Omap[keep_rows], adjmat, labels
+    return Imap[:, keep_rows], Omap[keep_rows], adjmat, labels, optimal
 
 
 def draw_solution(
@@ -418,10 +411,13 @@ def main():
 
     parser = ArgumentParser()
 
-    parser.add_argument('ni', type=int, help='number of inputs')
-    parser.add_argument('no', type=int, help='number of outputs')
+    parser.add_argument('M', type=int, help='number of inputs')
+    parser.add_argument('N', type=int, help='number of outputs')
     parser.add_argument(
-        'maxs', type=int, help='max number of splitters to consider'
+        '--maxs',
+        type=int,
+        default=None,
+        help='max number of splitters to consider'
     )
     parser.add_argument(
         '--mins',
@@ -444,7 +440,7 @@ def main():
         help='splitter counts are treated as exact instead of as upper bounds'
     )
     parser.add_argument(
-        '--solver', type=str, default='coin', help='specify the solver'
+        '--solver', type=str, default='gurobi', help='specify the solver'
     )
     parser.add_argument(
         '--reverse',
@@ -453,29 +449,44 @@ def main():
     )
 
     args = parser.parse_args(sys.argv[1:])
+    do_iterate = False
+
+    print(f'Solving the optimal {args.M} -> {args.N} balancer...')
+    if args.maxs is None:
+        print('No max given: iterating from minimum')
+        args.maxs = max(args.mins, lowerbound_splitters(args.M, args.N))
+        args.mins = args.maxs
+        do_iterate = True
+
+    while True:
+        try:
+            imap, omap, adjmat, labels, optimal = solve_balancers(
+                args.M,
+                args.N,
+                max_spls=args.maxs,
+                min_spls=args.mins,
+                exact_counts=args.exact or do_iterate,
+                solver=args.solver,
+            )
+        except (Infeasible, IllSpecified) as e:
+            print(f'No feasible solution within the given splitter limits:')
+            print(str(e))
+            if not do_iterate:
+                return
+            else:
+                args.maxs += 1
+                args.mins += 1
+                print(f'Trying again with exactly {args.maxs} splitters')
+                continue
+        break
 
     graphname = (
-        f'bal_{args.ni}-{args.no}'
-        f'{"-ge + str(args.mins)" if args.exact else ""}'
-        f'{"-mbe + str(args.maxb)" if args.maxb else ""}'
+        f'bal_{args.M}-{args.N}'
+        f'{("-ge" + str(args.maxs)) if args.exact else ""}'
+        f'{("-mbe" + str(args.maxb)) if args.maxb else ""}'
+        f'{"-subopt" if not optimal else ""}'
     )
     graphname = str(in_sol_dir(SOL_SUBDIR + graphname))
-
-    print(f'Solving the optimal {args.ni} -> {args.no} balancer...')
-    try:
-        imap, omap, adjmat, labels = solve_balancers(
-            args.ni,
-            args.no,
-            max_spls=args.maxs,
-            min_spls=args.mins,
-            max_backedges=args.maxb,
-            exact_counts=args.exact,
-            solver=args.solver,
-        )
-    except (Infeasible, IllSpecified) as e:
-        print(f'No feasible solution within the given splitter limits:')
-        print(str(e))
-        return
 
     draw_solution(
         imap,

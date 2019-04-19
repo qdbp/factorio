@@ -9,20 +9,39 @@ tile layouts.
 
 from __future__ import annotations
 
-import typing as ty
 from abc import abstractmethod
 from enum import Enum
 from itertools import product
+# import typing as ty
+from typing import Iterable, List, Tuple
 
 import numpy as np
 import pulp as pp
 
 from solver_core import (
-    IllSpecified, Infeasible, dicts_to_ndarray, get_dict_depth,
-    ndarray_to_dicts
+    IllSpecified, Infeasible, dicts_to_ndarray, ndarray_to_dicts, sumdict
 )
 
 T = ty.TypeVar('T', bound="TileSet")
+
+
+class Direction(Enum):
+    N = 'N'
+    E = 'E'
+    S = 'S'
+    W = 'W'
+
+
+class Tile(Enum):
+    Empty = 'Empty'
+    Belt = 'Belt'
+    UBelt = 'UBelt'
+    UBeltIn = 'UBeltIn'
+    UBeltOut = 'UBeltOut'
+    SplR = 'SplR'
+    SplL = 'SplL'
+
+    # def required_inputs(self) -> Iterable[Tuple[int, int,
 
 
 class TileSet(Enum):
@@ -63,65 +82,6 @@ class TileSet(Enum):
         raise NotImplementedError
 
 
-class BalancerTiles(TileSet):
-    '''
-    Represents belts, ubelts and splitters of homogeneous type.
-    '''
-    # NOTE the empty tile is implicity in the problem!
-    # Empty = 0
-    BeltN = 1
-    BeltE = 2
-    BeltS = 3
-    BeltW = 4
-    UBeltN = 5
-    UBeltE = 6
-    UBeltS = 7
-    UBeltW = 8
-    UBeltInN = 9
-    UBeltInE = 10
-    UBeltInS = 11
-    UBeltInW = 12
-    UBeltOutN = 13
-    UBeltOutE = 14
-    UBeltOutS = 15
-    UBeltOutW = 16
-    SplRN = 17
-    SplRE = 18
-    SplRS = 19
-    SplRW = 20
-    SplLN = 21
-    SplLE = 22
-    SplLS = 23
-    SplLW = 24
-
-    @property
-    def aboveground(self) -> bool:
-        return self not in self.exg_0()
-
-    @classmethod
-    def exclusion_groups(cls):
-        return [cls.exg_0(), cls.exg_1(), cls.exg_2()]
-
-    # exclusion groups
-    @classmethod
-    def exg_0(cls):
-        return cls.dict().keys() - {
-            cls.UBeltN, cls.UBeltE, cls.UBeltS, cls.UBeltW
-        }
-
-    @classmethod
-    def exg_1(cls):
-        return {cls.UBeltN, cls.UBeltS, cls.UBeltInN, cls.UBeltInS}
-
-    @classmethod
-    def exg_2(cls):
-        return {cls.UBeltE, cls.UBeltW, cls.UBeltInE, cls.UBeltInW}
-
-    @classmethod
-    def valid_interconns(cls, t: BalancerTiles):
-        pass
-
-
 def solve_balancer_layout(
         max_x: int,
         max_y: int,
@@ -151,7 +111,7 @@ def solve_balancer_layout(
 
     Xs = [f'x{ix}' for ix in range(max_x)]
     Ys = [f'y{iy}' for iy in range(max_y)]
-    Tiles = [None] + list(BalancerTiles.dict().keys())
+    Tiles = [None] + list(BalTil.dict().keys())
     Flows = [f's{fi}' for fi in range(C.shape[0])]
 
     # these are the coordinates not constained by edge conditions
@@ -185,18 +145,33 @@ def solve_balancer_layout(
     # # CHAPTER 0: BUILDABILITY
     # 0.0: NO OVERLAPPING TILES
     for x, y in product(Xs, Ys):
-        for excl_group in BalancerTiles.exclusion_groups():
+        for excl_group in BalTil.exclusion_groups():
             prob += pp.lpSum(
                 W[x][y][t][f] for t in excl_group for f in Flows
             ) <= 1
 
     # 0.1: VALID INTERCONNECTS
     # this is a long one...
+    BT = BalTil
     for (ix, x), (iy, y) in product(enumerate(Xs), enumerate(FreeYs)):
-        for t in Tiles:
-            Wxf = pp.lpSum(W[x][y][t][f] for f in Flows)
-            # 0.1.0 Belts are connected properly
-            V[x][y] = Wxf[x][y]
+
+        def w(ix: int, iy: int):
+            return sumdict({
+                t: pp.lpSum(W[Xs[ix]][Ys[iy]][t][f] for f in Flows)
+            })
+
+        ws: ty.Dict[ty.Optional[BalTil], ty.Any] = {
+            t: pp.lpSum(W[x][y][t][f] for f in Flows)
+            for t in Tiles
+        }
+
+        conss = [
+            ws[BT.BeltE] <= sum((
+                w(ix - 1, iy)[BT.BeltE, BT.UBeltOutE, BT.SplLE, BT.SplRE],
+                w(ix, iy - 1)[BT.BeltN, BT.UBeltOutN, BT.SplLN, BT.SplRN],
+                w(ix, iy + 1)[BT.BeltS, BT.UBeltOutS, BT.SplLS, BT.SplRS],
+            )),
+        ]
 
     # 0.2: EMPTY TILES HAVE FIXED FLOW
     # to make the optimizer's job easier
@@ -209,13 +184,14 @@ def solve_balancer_layout(
         prob += pp.lpSum(W[x][y][t][f] for f in Flows) <= 1
 
     # 1.1 NO USELESS TILES
+    # FIXME
     # a tile is either empty or valid
-    for x, y in product(FreeXs, FreeYs):
-        prob += V[x][y] + pp.lpSum(W[x][y][None][f] for f in Flows) == 1
+    # for x, y in product(FreeXs, FreeYs):
+    #     prob += V[x][y] + pp.lpSum(W[x][y][None][f] for f in Flows) == 1
 
     # ## SOLVE
     prob.solve()
 
 
 if __name__ == '__main__':
-    print(BalancerTiles.dict())
+    print(BalTil.dict())
