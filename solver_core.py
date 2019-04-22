@@ -146,6 +146,14 @@ class lparray(np.ndarray):
             (out >= _in).constrain(prob, f'{name}_or_lb{ix}')
         (out <= sum(ins)).constrain(prob, f'{name}_and_ub')
 
+    @staticmethod
+    def abs_ge(prob: pp.LpProblem, name: str, x: lparray, lim, bigM=1000):
+
+        b = pp.LpVariable(f'{name}_b', 0, 1, pp.LpBinary)
+
+        ((x + bigM * b) >= lim).constrain(prob, f'{name}_ub')
+        ((-x + bigM * (1 - b)) >= lim).constrain(prob, f'{name}_lb')
+
     @classmethod
     def create(cls, name: str, index_sets, *args, **kwargs) -> lparray:
         '''
@@ -323,7 +331,7 @@ class lparray(np.ndarray):
             aux_name, self, lowBound=0, upBound=1, cat=pp.LpBinary
         )
 
-        (w.sum(axis=axis) >= 1).constrain(prob, f'{mmname}_auxsum')
+        (w.sum(axis=axis) == 1).constrain(prob, f'{mmname}_auxsum')
 
         if which == 'max':
             (z_br >= self).constrain(prob, f'{mmname}_lb')
@@ -349,14 +357,14 @@ class lparray(np.ndarray):
         )
 
     def lp_int_max(
-            self, name: str, prob: pp.LpProblem, lb: int, ub: int, **kwargs
+            self, prob: pp.LpProblem, name: str, lb: int, ub: int, **kwargs
     ) -> pp.LpVariable:
         return self._lp_int_minmax(
             prob, name, which='max', lb=lb, ub=ub, **kwargs
         )
 
     def lp_int_min(
-            self, name: str, prob: pp.LpProblem, lb: int, ub: int, *args,
+            self, prob: pp.LpProblem, name: str, lb: int, ub: int, *args,
             **kwargs
     ) -> pp.LpVariable:
         return self._lp_int_minmax(

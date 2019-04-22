@@ -57,6 +57,8 @@ def solve_balancers(
     22 and 12 splitters.
     '''
 
+    bigM = 10000
+
     if M > N:
         raise IllSpecified(
             'The problem formulation only allows for fanout designs. '
@@ -76,16 +78,16 @@ def solve_balancers(
         max_spls = 1
 
     # number of pinned input splitters, disjoint from output splitters
-    n_s_i_tot = n_s_i_0 = ceil(M / 2)
+    nsitot = nsi0 = ceil(M / 2)
 
     # number of pinned output splitters, disjoint from input splitters
     # if N > 2, outputs can't be connected straight to an input splitter.
     # This is the first separation theorem (see below)
-    n_s_o_tot = n_s_o_0 = ceil(N / 2) if N > 2 else 0
+    nsotot = nso0 = ceil(N / 2) if N > 2 else 0
 
     # we must have at least the input and output pinned splitters
     # this can be better than the previous lower bound for some M, N
-    min_spls = max(min_spls, n_s_i_0 + n_s_o_0)
+    min_spls = max(min_spls, nsi0 + nso0)
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -138,76 +140,31 @@ def solve_balancers(
     # TODO H + 3 is arbitrary, find a proper bound
     r_max = H + 3
 
-    Ro = lparray.create("Ro", (Splitters, range(r_max)), 0, 1, pp.LpBinary)
-    Ri = lparray.create("Ri", (Splitters, range(r_max)), 0, 1, pp.LpBinary)
+    Ro = lparray.create("Ro", (Splitters, ), 0, r_max, pp.LpInteger)
+    Ri = lparray.create("Ri", (Splitters, ), 0, r_max, pp.LpInteger)
 
     prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
     # Ro gives the "out rank" (orank) of a node. The out rank is defined as the
     # shortest distance from the node to one of the outputs, measured in
     # intermediate nodes.
-    # Clearly each node only has one orank.
-    (Ro.sum(axis=1) == 1).constrain(prob, "UniqueORank")
     # The output nodes have orank 0 by definition
-    (Ro[-n_s_o_0:, 0] == 1).constrain(prob, "ORankEdge")
-    # We can write the logical expression governing the sufficient conditions
-    # for a node to have an orank r:
-    #
-    # Ro(u, r) ⇔
-    #    [∃ w: C(u, w) ∧ Ro(w, r - 1)]
-    #  ∧ [∄ w: C(u, w) ∧ ⋁ {r' ∈ 0..r-2} Ro(w, r')]
-    #
-    # in words, a node has orank r if and only if it connects to a node of
-    # orank r - 1 and no node of orank r - 2 or lower.
-    for h in range(1, r_max):
-        # ∃ w: C(u, w) ∧ R(w, r - 1) <=> max{w} C[u, w] + R[w, r - 1] == 2
-        t0sum = Conn[:-n_s_o_0] + Ro[None, :, h - 1]
-        term_0 = t0sum.lp_int_max(f'ro_t0_{h}', prob, lb=1, ub=2, axis=1) - 1
-
-        # ∄ w: C(u, w) ∧ ⋁ {r' ∈ 0..r-2} R(w, r') <=>
-        #   max{w} C[u, w] + sum{r':0..r-2}R[w, r'] <= 1
-        if h == 1:
-            term_1 = pp.LpAffineExpression(1)
-        else:
-            t1sum = Conn[:-n_s_o_0] + Ro[None, :, :h - 1].sum(axis=-1)
-            term_1 = 2 - t1sum.lp_int_max(
-                f'ro_t1_{h}', prob, lb=1, ub=2, axis=1
-            )
-
-        # Ro(., h) = t0(., h) ∧ t1(., h)
-        lparray.bin_and(
-            prob, f'ORankDef_{h}', Ro[:-n_s_o_0, h], term_0, term_1
-        )
+    (Ro[-nso0:] == 0).constrain(prob, "ORankEdge")
+    rosum = Ro[:-nso0, None] + 100 * (1 - Conn[:-nso0])
+    romin = 1 + rosum.lp_int_min(prob, 'ORankMin', lb=0, ub=r_max, axis=1)
+    (Ro[:-nso0] == romin).constrain(prob, 'ORankDef')
 
     # Ri is the input rank. Everything is by analogy to Ro
-    (Ri.sum(axis=1) == 1).constrain(prob, "UniqueIRank")
-    (Ri[:n_s_i_0, 0] == 1).constrain(prob, "IRankEdge")
-    # Ri(v, r) ⇔
-    #    [∃ u: C(u, v) ∧ Ri(u, r - 1)]
-    #  ∧ [∄ u: C(u, v) ∧ ⋁ {r' ∈ 0..r-2} Ri(u, r')]
-    for h in range(1, r_max):
-        # ∃ u: C(u, v) ∧ R(u, r - 1) <=> max{u} C[u, v] + R[u, r - 1] == 2
-        t0sum = Conn[:, n_s_i_0:] + Ri[:, h - 1, None]
-        term_0 = t0sum.lp_int_max(f'ri_t0_{h}', prob, lb=1, ub=2, axis=0) - 1
-
-        # ∄ w: C(u, v) ∧ ⋁ {r' ∈ 0..r-2} R(u, r') <=>
-        #   max{u} C[u, v] + sum{r':0..r-2}R[u, r'] <= 1
-        if h == 1:
-            term_1 = pp.LpAffineExpression(1)
-        else:
-            t1sum = Conn[:, n_s_i_0:] + Ri[:, :h - 1, None].sum(axis=1)
-            term_1 = 2 - t1sum.lp_int_max(
-                f'ri_t1_{h}', prob, lb=1, ub=2, axis=0
-            )
-
-        # Ri(., h) = t0(., h) ∧ t1(., h)
-        lparray.bin_and(prob, f'IRankDef_{h}', Ri[n_s_i_0:, h], term_0, term_1)
+    # (Ri[:nsi0] == 0).constrain(prob, "IRankEdge")
+    # risum = Ri[None, nsi0:] + 100 * (1 - Conn[:, nsi0:])
+    # rimin = 1 + risum.lp_int_min(prob, 'IRankMin', lb=0, ub=r_max, axis=0)
+    # (Ri[nsi0:] == rimin).constrain(prob, 'IRankDef')
 
     if not exact_counts:
         print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
     else:
         print(f'Solver/Info: solving with exactly {max_spls} splitters')
-    print(f'Solver/Info: {n_s_i_0} input pinned; ' f'{n_s_o_0} output pinned')
+    print(f'Solver/Info: {nsi0} input pinned; ' f'{nso0} output pinned')
 
     # ## CONSTRAINTS
     # # CHAPTER 0: CONNECTIVITY RESTRICTIONS
@@ -239,34 +196,41 @@ def solve_balancers(
     # 0.1.0 N > 4 SEPARATION THEOREM
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        (Ro[:, 1] + Ri[:, 0] <= 1).constrain(prob, 'Sep4_10')
-        (Ro[:, 0] + Ri[:, 1] <= 1).constrain(prob, 'Sep4_01')
+        (Ro + Ri >= 3).constrain(prob, 'Sep4')
+        # (Ro[:, 1] + Ri[:, 0] <= 1).constrain(prob, 'Sep4_10')
+        # (Ro[:, 0] + Ri[:, 1] <= 1).constrain(prob, 'Sep4_01')
+        # lparray.abs_ge(prob, 'Sep4_10', Ro[:, 1] - Ri[:, 0], 1)
+        # lparray.abs_ge(prob, 'Sep4_01', Ro[:, 0] - Ri[:, 1], 1)
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
     #                i:o     0:2   1:1   2:0
     # Proof. As above.
     if N > 8:
-        (Ro[:, 2] + Ri[:, 0] <= 1).constrain(prob, 'Sep8_20')
-        (Ro[:, 1] + Ri[:, 1] <= 1).constrain(prob, 'Sep8_11')
-        (Ro[:, 0] + Ri[:, 2] <= 1).constrain(prob, 'Sep8_02')
+        # (Ro[:, 2] + Ri[:, 0] <= 1).constrain(prob, 'Sep8_20')
+        # (Ro[:, 1] + Ri[:, 1] <= 1).constrain(prob, 'Sep8_11')
+        # (Ro[:, 0] + Ri[:, 2] <= 1).constrain(prob, 'Sep8_02')
+        (Ro + Ri >= 4).constrain(prob, 'Sep8')
+        # lparray.abs_ge(prob, 'Sep8_20', Ro[:, 2] - Ri[:, 0], 1)
+        # lparray.abs_ge(prob, 'Sep4_11', Ro[:, 1] - Ri[:, 1], 1)
+        # lparray.abs_ge(prob, 'Sep4_02', Ro[:, 0] - Ri[:, 2], 1)
 
-    assert min_spls >= n_s_o_tot + n_s_i_tot
+    assert min_spls >= nsotot + nsitot
 
     # 0.2: RESPECT PINS
     if not exact_counts:
-        (S[:n_s_i_tot] == 1).constrain(prob, 'InPins')
-        if n_s_o_tot > 0:
-            (S[-n_s_o_tot:] == 1).constrain(prob, 'OutPins')
+        (S[:nsitot] == 1).constrain(prob, 'InPins')
+        if nsotot > 0:
+            (S[-nsotot:] == 1).constrain(prob, 'OutPins')
 
         # 0.3 UNPINNED SPLITTERS ARE ORDERED
-        Sl = S[n_s_i_tot:max_spls - n_s_o_tot - 1]
-        Su = S[n_s_i_tot + 1:max_spls - n_s_o_tot]
+        Sl = S[nsitot:max_spls - nsotot - 1]
+        Su = S[nsitot + 1:max_spls - nsotot]
         (Sl >= Su).constrain(prob, "UnpinnedSplitterOrder")
 
         print(f'Solver/Info: {len(Sl) + 1} unpinned splitters.')
 
-        free_locked = max(0, min_spls - n_s_i_tot - n_s_o_tot)
+        free_locked = max(0, min_spls - nsitot - nsotot)
         if free_locked > 0:
             print(f'Solver/Info: {free_locked} unpinned splitters are locked')
             (Sl[:free_locked] == 1).constrain(prob, "FreeLocked")
