@@ -12,8 +12,8 @@ import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
 from solver_core import (
-    IllSpecified, Infeasible, dicts_to_ndarray, get_lparr_value, get_solver,
-    in_sol_dir, lparray, ndarray_to_dicts, number, numprod
+    IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
+    lparray, ndarray_to_dicts, number, numprod
 )
 
 SOL_SUBDIR = './balancers/'
@@ -344,11 +344,11 @@ def solve_balancers(
     print(optimal)
 
     if not exact_counts:
-        keep_rows = np.where(get_lparr_value(S) > 0)[0]
+        keep_rows = np.where(S.values > 0)[0]
     else:
         keep_rows = np.arange(max_spls, dtype=np.int32)
 
-    adjmat = get_lparr_value(Conn)[np.ix_(keep_rows, keep_rows)]
+    adjmat = Conn.values[np.ix_(keep_rows, keep_rows)]
     labels = np.array(Splitters)[keep_rows]
 
     return Imap[:, keep_rows], Omap[keep_rows], adjmat, labels, optimal
