@@ -12,8 +12,8 @@ import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
 from solver_core import (
-    IllSpecified, Infeasible, dicts_to_ndarray, get_lparr_value, get_solver,
-    in_sol_dir, lparray, ndarray_to_dicts, number, numprod
+    IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
+    lparray, ndarray_to_dicts, number, numprod
 )
 
 SOL_SUBDIR = './balancers/'
@@ -131,11 +131,77 @@ def solve_balancers(
 
     # input flows
     Fi = lparray.create("Fi", (Inps, Splitters, Inps), 0., 1., pp.LpContinuous)
-    # output map: Omap[u, t] == 1 <=> splitter u flows into output t
     # output flows
     Fo = lparray.create("Fo", (Splitters, Outs, Inps), 0., 1., pp.LpContinuous)
 
+    H = ceil(np.log2(N))
+    # TODO H + 3 is arbitrary, find a proper bound
+    r_max = H + 3
+
+    Ro = lparray.create("Ro", (Splitters, range(r_max)), 0, 1, pp.LpBinary)
+    Ri = lparray.create("Ri", (Splitters, range(r_max)), 0, 1, pp.LpBinary)
+
     prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
+
+    # Ro gives the "out rank" (orank) of a node. The out rank is defined as the
+    # shortest distance from the node to one of the outputs, measured in
+    # intermediate nodes.
+    # Clearly each node only has one orank.
+    (Ro.sum(axis=1) == 1).constrain(prob, "UniqueORank")
+    # The output nodes have orank 0 by definition
+    (Ro[-n_s_o_0:, 0] == 1).constrain(prob, "ORankEdge")
+    # We can write the logical expression governing the sufficient conditions
+    # for a node to have an orank r:
+    #
+    # Ro(u, r) ⇔
+    #    [∃ w: C(u, w) ∧ Ro(w, r - 1)]
+    #  ∧ [∄ w: C(u, w) ∧ ⋁ {r' ∈ 0..r-2} Ro(w, r')]
+    #
+    # in words, a node has orank r if and only if it connects to a node of
+    # orank r - 1 and no node of orank r - 2 or lower.
+    for h in range(1, r_max):
+        # ∃ w: C(u, w) ∧ R(w, r - 1) <=> max{w} C[u, w] + R[w, r - 1] == 2
+        t0sum = Conn[:-n_s_o_0] + Ro[None, :, h - 1]
+        term_0 = t0sum.lp_int_max(f'ro_t0_{h}', prob, lb=1, ub=2, axis=1) - 1
+
+        # ∄ w: C(u, w) ∧ ⋁ {r' ∈ 0..r-2} R(w, r') <=>
+        #   max{w} C[u, w] + sum{r':0..r-2}R[w, r'] <= 1
+        if h == 1:
+            term_1 = pp.LpAffineExpression(1)
+        else:
+            t1sum = Conn[:-n_s_o_0] + Ro[None, :, :h - 1].sum(axis=-1)
+            term_1 = 2 - t1sum.lp_int_max(
+                f'ro_t1_{h}', prob, lb=1, ub=2, axis=1
+            )
+
+        # Ro(., h) = t0(., h) ∧ t1(., h)
+        lparray.bin_and(
+            prob, f'ORankDef_{h}', Ro[:-n_s_o_0, h], term_0, term_1
+        )
+
+    # Ri is the input rank. Everything is by analogy to Ro
+    (Ri.sum(axis=1) == 1).constrain(prob, "UniqueIRank")
+    (Ri[:n_s_i_0, 0] == 1).constrain(prob, "IRankEdge")
+    # Ri(v, r) ⇔
+    #    [∃ u: C(u, v) ∧ Ri(u, r - 1)]
+    #  ∧ [∄ u: C(u, v) ∧ ⋁ {r' ∈ 0..r-2} Ri(u, r')]
+    for h in range(1, r_max):
+        # ∃ u: C(u, v) ∧ R(u, r - 1) <=> max{u} C[u, v] + R[u, r - 1] == 2
+        t0sum = Conn[:, n_s_i_0:] + Ri[:, h - 1, None]
+        term_0 = t0sum.lp_int_max(f'ri_t0_{h}', prob, lb=1, ub=2, axis=0) - 1
+
+        # ∄ w: C(u, v) ∧ ⋁ {r' ∈ 0..r-2} R(u, r') <=>
+        #   max{u} C[u, v] + sum{r':0..r-2}R[u, r'] <= 1
+        if h == 1:
+            term_1 = pp.LpAffineExpression(1)
+        else:
+            t1sum = Conn[:, n_s_i_0:] + Ri[:, :h - 1, None].sum(axis=1)
+            term_1 = 2 - t1sum.lp_int_max(
+                f'ri_t1_{h}', prob, lb=1, ub=2, axis=0
+            )
+
+        # Ri(., h) = t0(., h) ∧ t1(., h)
+        lparray.bin_and(prob, f'IRankDef_{h}', Ri[n_s_i_0:, h], term_0, term_1)
 
     if not exact_counts:
         print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
@@ -173,62 +239,25 @@ def solve_balancers(
     # 0.1.0 N > 4 SEPARATION THEOREM
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        print(f'Solver/Info: {n_s_o_0 * n_s_i_0} entries zeroed.')
-
-        (Conn[:n_s_i_0, -n_s_o_0:] == 0).constrain(prob, "Sep4")
+        (Ro[:, 1] + Ri[:, 0] <= 1).constrain(prob, 'Sep4_10')
+        (Ro[:, 0] + Ri[:, 1] <= 1).constrain(prob, 'Sep4_01')
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
+    #                i:o     0:2   1:1   2:0
     # Proof. As above.
-    #
-    # From this it follows Im disjoint On if m + n < 3.
-    #
-    # I believe a linear constraint for this theorem exactly does not exist.
-    # However, we can allocate lower bounds on the size of blocks on I1 and I2
-    # |I1| >= I0 -- since the flow cannot be compressed.
-    # |O1| >= max(|I0|, ceil(|O0| / 2)) -- since flow cannot be
-    # compressed and splitters fan out at most by 2
-    #
-    # 0.1.1 N > 8 SEPARATION THEOREM
     if N > 8:
-        n_s_i_1 = n_s_i_0
-        n_s_o_1 = max(n_s_i_1, ceil(n_s_o_0 / 2))
-
-        n_s_i_tot += n_s_i_1
-        n_s_o_tot += n_s_o_1
-
-        print('Solver/Info: invoking N > 8 separation theorem:')
-        print(f'Solver/Info: {n_s_i_1} I1 pinned. ', end='')
-        print(f'{n_s_o_1} O1 pinned. ', end='')
-
-        # lower bound constraint: each element in the I1 lower bound
-        # must receive at least one connection from an element of I0
-        (Conn[:n_s_i_0, n_s_i_0:n_s_i_tot].sum(axis=0) >=
-         1).constrain(prob, "I1def")
-
-        # lower bound constraint: each element in the O1 lower bound
-        # must send at least one connection to an element of O0
-        (Conn[-n_s_o_tot:-n_s_o_0, -n_s_o_0:].sum(axis=1) >=
-         1).constrain(prob, "O1def")
-
-        # I1 disjoint O1 (lower bound)
-        # NOTE implied by separate indices
-
-        # I2 disjoint O0
-        (Conn[n_s_i_0:n_s_i_tot, -n_s_o_0:] == 0).constrain(prob, "Sep8a")
-
-        # I0 disjoint O2
-        (Conn[:n_s_i_0, -n_s_o_tot:n_s_o_0] == 0).constrain(prob, "Sep8b")
-
-        print(f'{n_s_i_1 * n_s_o_0 + n_s_i_0 * n_s_o_1} entries zeroed.')
+        (Ro[:, 2] + Ri[:, 0] <= 1).constrain(prob, 'Sep8_20')
+        (Ro[:, 1] + Ri[:, 1] <= 1).constrain(prob, 'Sep8_11')
+        (Ro[:, 0] + Ri[:, 2] <= 1).constrain(prob, 'Sep8_02')
 
     assert min_spls >= n_s_o_tot + n_s_i_tot
 
     # 0.2: RESPECT PINS
     if not exact_counts:
-        (S[:n_s_i_tot] == 1).constrain(prob)
+        (S[:n_s_i_tot] == 1).constrain(prob, 'InPins')
         if n_s_o_tot > 0:
-            (S[-n_s_o_tot:] == 1).constrain(prob)
+            (S[-n_s_o_tot:] == 1).constrain(prob, 'OutPins')
 
         # 0.3 UNPINNED SPLITTERS ARE ORDERED
         Sl = S[n_s_i_tot:max_spls - n_s_o_tot - 1]
@@ -344,14 +373,25 @@ def solve_balancers(
     print(optimal)
 
     if not exact_counts:
-        keep_rows = np.where(get_lparr_value(S) > 0)[0]
+        keep_rows = np.where(S.values > 0)[0]
     else:
         keep_rows = np.arange(max_spls, dtype=np.int32)
 
-    adjmat = get_lparr_value(Conn)[np.ix_(keep_rows, keep_rows)]
+    adjmat = Conn.values[np.ix_(keep_rows, keep_rows)]
     labels = np.array(Splitters)[keep_rows]
 
-    return Imap[:, keep_rows], Omap[keep_rows], adjmat, labels, optimal
+    orank = np.argmax(Ro.values[keep_rows], axis=1)
+    irank = np.argmax(Ri.values[keep_rows], axis=1)
+
+    return (
+        Imap[:, keep_rows],
+        Omap[keep_rows],
+        adjmat,
+        irank,
+        orank,
+        labels,
+        optimal,
+    )
 
 
 def draw_solution(
@@ -360,6 +400,8 @@ def draw_solution(
         splmat: np.ndarray,
         labels=None,
         graphname='graph.png',
+        orank=None,
+        irank=None,
 ) -> None:
 
     n_inps = imap.shape[0]
@@ -389,10 +431,18 @@ def draw_solution(
     g = nx.convert_matrix.from_numpy_array(
         full_adjmat, create_using=nx.DiGraph
     )
+
+    orank_labels = [f':o{r}'
+                    for r in orank] if orank is not None else [''] * n_spls
+    irank_labels = [f'i{r}:'
+                    for r in irank] if irank is not None else [''] * n_spls
+
     if labels is not None:
         g = nx.relabel_nodes(
-            g, {ix + n_inps: label
-                for ix, label in enumerate(labels)}
+            g, {
+                ix + n_inps: irank_labels[ix] + label + orank_labels[ix]
+                for ix, label in enumerate(labels)
+            }
         )
 
     values = ['red'] * n_inps + ['black'] * n_spls + ['blue'] * n_outs
@@ -431,9 +481,6 @@ def main():
         default=None,
         help='max number of backedges',
     )
-    # parser.add_argument(
-    #     'm21', type=int, help='max number of 2->1 splitters to consider'
-    # )
     parser.add_argument(
         '--exact',
         action='store_true',
@@ -460,7 +507,15 @@ def main():
 
     while True:
         try:
-            imap, omap, adjmat, labels, optimal = solve_balancers(
+            (
+                imap,
+                omap,
+                adjmat,
+                irank,
+                orank,
+                labels,
+                optimal,
+            ) = solve_balancers(
                 args.M,
                 args.N,
                 max_spls=args.maxs,
@@ -494,6 +549,8 @@ def main():
         adjmat,
         labels=labels,
         graphname=graphname,
+        orank=orank,
+        irank=irank,
     )
     print(f'solution saved to {graphname}.png')
 

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pulp as pp
-from numpy import einsum as ein
 
 SOLDIR = Path('./solutions/')
 
@@ -135,11 +134,26 @@ class sumdict(dict):
 
 
 class lparray(np.ndarray):
+    @staticmethod
+    def bin_and(prob: pp.LpProblem, name: str, out: lparray, *ins: lparray):
+        for ix, _in in enumerate(ins):
+            (out <= _in).constrain(prob, f'{name}_and_ub{ix}')
+        (out >= sum(ins, 1 - len(ins))).constrain(prob, f'{name}_and_lb')
+
+    @staticmethod
+    def bin_or(prob: pp.LpProblem, name: str, out: lparray, *ins: lparray):
+        for ix, _in in enumerate(ins):
+            (out >= _in).constrain(prob, f'{name}_or_lb{ix}')
+        (out <= sum(ins)).constrain(prob, f'{name}_and_ub')
+
     @classmethod
     def create(cls, name: str, index_sets, *args, **kwargs) -> lparray:
         '''
         Numpy array equivalent of pulp.LpVariable.dicts
         '''
+
+        if len(index_sets) == 1:
+            name = name + '('
 
         def _rworker(name: str, plane: np.ndarray, index_sets):
             if len(index_sets) == 1:
@@ -160,7 +174,18 @@ class lparray(np.ndarray):
         )
         _rworker(name, arr, index_sets)
 
-        return arr.view(lparray)
+        return arr.view(lparray)  # type: ignore
+
+    @classmethod
+    def create_like(cls, name: str, like: lparray, *args, **kwargs) -> lparray:
+        return cls.create_anon(name, like.shape, *args, **kwargs)
+
+    @classmethod
+    def create_anon(
+            cls, name: str, shape: ty.Tuple[int, ...], *args, **kwargs
+    ) -> lparray:
+        ixsets = tuple(list(range(d)) for d in shape)
+        return cls.create(name, ixsets, *args, **kwargs)
 
     def __ge__(self, other):
         return np.greater_equal(self, other, dtype=object)
@@ -185,12 +210,19 @@ class lparray(np.ndarray):
         out = self.sum(*args, **kwargs)
         return out.item()
 
-    def constrain(self, prob: pp.LpProblem, name: str = None) -> None:
+    def constrain(self, prob: pp.LpProblem, name: str) -> None:
+        if not isinstance(prob, pp.LpProblem):
+            raise TypeError(
+                f'Trying to constrain a {type(prob)}. Did you pass prob?'
+            )
         if self.ndim == 0:
             cons = self.item()
             cons.name = name
             prob += cons
             return
+
+        if name and self.ndim == 1:
+            name = name + '('
 
         def _rworker(prob, plane, name):
             if plane.ndim == 1:
@@ -236,8 +268,110 @@ class lparray(np.ndarray):
 
         return z
 
-    def extract_values(self) -> np.ndarray:
-        return np.vectorize(lambda x: pp.value(x))(self).view(np.ndarray)
+    def _lp_minmax(
+            self,
+            name: str,
+            prob: pp.LpProblem,
+            which,
+            categ,
+            lb=None,
+            ub=None,
+            bigM=10000,
+            axis: ty.Union[None, int, ty.Tuple[int, ...]] = None,
+    ):
+
+        if not np.product(self.shape):
+            raise ValueError('No variables given!')
+
+        # if any(v.cat != categ for v in self.ravel()):
+        #     raise ValueError(f'This function expects {categ} variables')
+
+        if axis is None:
+            axis = tuple(range(self.ndim))
+        elif isinstance(axis, int):
+            axis = (axis, )
+        elif (not isinstance(axis, tuple) or not axis
+              or any(not isinstance(ax, int) or ax < 0 for ax in axis)):
+            raise TypeError("Axis must be a tuple of positive integers")
+
+        if categ == pp.LpBinary:
+            lb = 0
+            ub = 1
+        elif lb is None or ub is None:
+            assert 0, "Need to supply constraints for non-binary variables!"
+
+        assert which in ('min', 'max')
+
+        mmname = f'{name}_{which}'
+        aux_name = f'{name}_{which}_aux'
+
+        # axes of self which the max is indexed by
+        keep_axis = tuple(sorted(set(range(self.ndim)) - set(axis)))
+
+        # array of maxes
+        minmax_shape = sum((self.shape[ax:ax + 1] for ax in keep_axis), ())
+        z = lparray.create_anon(mmname, minmax_shape, lb, ub, categ)
+
+        # broadcastable version for comparison with self
+        minmax_br_index = tuple(
+            (slice(None, None, None) if ax in keep_axis else None)
+            for ax in range(self.ndim)
+        )
+        z_br = z[minmax_br_index]
+
+        w = self.create_like(
+            aux_name, self, lowBound=0, upBound=1, cat=pp.LpBinary
+        )
+
+        (w.sum(axis=axis) >= 1).constrain(prob, f'{mmname}_auxsum')
+
+        if which == 'max':
+            (z_br >= self).constrain(prob, f'{mmname}_lb')
+            (z_br <= self + bigM * (1 - w)).constrain(prob, f'{mmname}_ub')
+        elif which == 'min':
+            (z_br <= self).constrain(prob, f'{mmname}_ub')
+            (z_br >= self - bigM * (1 - w)).constrain(prob, f'{mmname}_lb')
+
+        return z
+
+    def _lp_int_minmax(
+            self, name: str, prob: pp.LpProblem, which: str, lb: int, ub: int,
+            **kwargs
+    ) -> pp.LpVariable:
+
+        if lb == 0 and ub == 1:
+            cat = pp.LpBinary
+        else:
+            cat = pp.LpInteger
+
+        return self._lp_minmax(
+            prob, name, which=which, categ=cat, lb=lb, ub=ub, **kwargs
+        )
+
+    def lp_int_max(
+            self, name: str, prob: pp.LpProblem, lb: int, ub: int, **kwargs
+    ) -> pp.LpVariable:
+        return self._lp_int_minmax(
+            prob, name, which='max', lb=lb, ub=ub, **kwargs
+        )
+
+    def lp_int_min(
+            self, name: str, prob: pp.LpProblem, lb: int, ub: int, *args,
+            **kwargs
+    ) -> pp.LpVariable:
+        return self._lp_int_minmax(
+            prob, name, which='min', lb=lb, ub=ub, **kwargs
+        )
+
+    def lp_bin_max(self, name: str, prob: pp.LpProblem, *args, **kwargs):
+        return self._lp_int_minmax(
+            prob, name, lb=0, ub=1, which='max', **kwargs
+        )
+
+    def lp_bin_min(self, name: str, prob: pp.LpProblem, *args, **kwargs):
+        return self._lp_int_minmax(
+            prob, name, lb=0, ub=1, which='min', **kwargs
+        )
 
 
 if __name__ == '__main__':
@@ -260,5 +394,12 @@ if __name__ == '__main__':
     con.constrain(prob, name='diag')
 
     prob += X.sumit()
+    print(prob)
 
+    prob = pp.LpProblem('foo')
+    z = X.lp_bin_max('rowmax', prob, axis=0)
+    print(prob)
+
+    prob = pp.LpProblem('foo')
+    z = X.lp_bin_max('colmax', prob, axis=1)
     print(prob)
