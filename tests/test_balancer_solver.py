@@ -1,4 +1,4 @@
-from balancer_solver import solve_balancers
+from factorio.balancer_solver import solve_balancers
 
 
 def test_suite():

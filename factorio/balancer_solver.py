@@ -11,7 +11,7 @@ import numpy as np
 import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
-from solver_core import (
+from .solver_core import (
     IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
     lparray, ndarray_to_dicts, number, numprod
 )

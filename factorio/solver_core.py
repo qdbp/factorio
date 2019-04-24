@@ -260,8 +260,10 @@ class lparray(np.ndarray):
 
         # w == 1 <=> self <= 0
         w = lparray.create_like(f'{name}_abs_aux', self, 0, 1, pp.LpBinary)
-        (self <= -bigM * (1 - w)).constrain(prob, f'{name}_lb')
-        (self >= bigM * w).constrain(prob, f'{name}_ub')
+        # binding if self >= 0
+        (self <= bigM * (1 - w)).constrain(prob, f'{name}_lb')
+        # binding if self <= 0
+        (self >= -bigM * w).constrain(prob, f'{name}_ub')
 
         # xp is the positive half of X, xm is the negative half of X
         xp = lparray.create_like(f'{name}_absp', self, *args)
@@ -277,7 +279,9 @@ class lparray(np.ndarray):
 
         return xp, xm
 
-    def logical_clip(self, prob: pp.LpProblem, bigM=1000) -> lparray:
+    def logical_clip(
+            self, prob: pp.LpProblem, name: str, bigM=1000
+    ) -> lparray:
         '''
         Assumes self is integer >= 0.
 
@@ -287,19 +291,12 @@ class lparray(np.ndarray):
         Generates self.size new variables.
         '''
 
-        if self.ndim == 0:
-            basename = self.item().name
-        else:
-            basename = self[(0, ) * self.ndim].split('(')[:-1].join('(')
-
-        clipname = basename + '_lclipped'
-
         z = self.__class__.create(
-            clipname, [range(x) for x in self.shape], 0, 1, pp.LpBinary
+            name, [range(x) for x in self.shape], 0, 1, pp.LpBinary
         )
 
-        (self >= z).constrain(prob, clipname + '_limit')
-        (self <= bigM * z).constrain(prob, clipname + '_reach')
+        (self >= z).constrain(prob, f'{name}_lb')
+        (self <= bigM * z).constrain(prob, f'{name}_ub')
 
         return z
 
@@ -400,12 +397,12 @@ class lparray(np.ndarray):
             prob, name, which='min', lb=lb, ub=ub, **kwargs
         )
 
-    def lp_bin_max(self, name: str, prob: pp.LpProblem, *args, **kwargs):
+    def lp_bin_max(self, prob: pp.LpProblem, name: str, *args, **kwargs):
         return self._lp_int_minmax(
             prob, name, lb=0, ub=1, which='max', **kwargs
         )
 
-    def lp_bin_min(self, name: str, prob: pp.LpProblem, *args, **kwargs):
+    def lp_bin_min(self, prob: pp.LpProblem, name: str, *args, **kwargs):
         return self._lp_int_minmax(
             prob, name, lb=0, ub=1, which='min', **kwargs
         )
