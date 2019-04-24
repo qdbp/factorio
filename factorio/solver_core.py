@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pulp as pp
 
-SOLDIR = Path('./solutions/')
+SOLDIR = Path("./solutions/")
 
 
 class Infeasible(Exception):
@@ -23,8 +23,9 @@ def number(it: ty.Iterable) -> ty.List[int]:
     return list(ix for ix, _ in enumerate(it))
 
 
-def numprod(*its: ty.Iterable
-            ) -> ty.Generator[ty.Tuple[ty.Any, ...], None, None]:
+def numprod(
+    *its: ty.Iterable
+) -> ty.Generator[ty.Tuple[ty.Any, ...], None, None]:
 
     yield from product(*map(number, its))
 
@@ -34,23 +35,20 @@ def in_sol_dir(fn: str) -> Path:
     return SOLDIR.joinpath(fn)
 
 
-SOLVER_FALLBACK = ['gurobi', 'coin', 'glpk']
+SOLVER_FALLBACK = ["gurobi", "coin", "glpk"]
 
 
 def get_solver(
-        which='coin', threads: int = None, _fallback=None, verbose=True
+    which=SOLVER_FALLBACK[0], threads: int = None, _fallback=None, verbose=True
 ):
     threads = threads or os.cpu_count() or 1
-    if which == 'coin':
-        return pp.solvers.COIN_CMD(
-            msg=int(verbose),
-            threads=threads,
-        )
-    if which == 'coinmp':
+    if which == "coin":
+        solver = pp.solvers.COIN_CMD(msg=int(verbose), threads=threads)
+    elif which == "coinmp":
         solver = pp.solvers.COINMP_DLL()
-    elif which == 'glpk':
+    elif which == "glpk":
         solver = pp.solvers.GLPK()
-    elif which == 'gurobi':
+    elif which == "gurobi":
         solver = pp.solvers.GUROBI(
             threads=threads,
             display_interval=60,
@@ -67,19 +65,17 @@ def get_solver(
         _fallback = SOLVER_FALLBACK.copy()
     _fallback.remove(which)
     if not _fallback:
-        print('Could not get a solver!')
+        print("Could not get a solver!")
         return None
     print(
-        f'Solver: {which} solver is not available. '
-        f'Falling back on {_fallback[0]}'
+        f"Solver: {which} solver is not available. "
+        f"Falling back on {_fallback[0]}"
     )
     return get_solver(which=_fallback[0], threads=threads, _fallback=_fallback)
 
 
 def dicts_to_ndarray(
-        dicts,
-        index_sets: ty.Tuple[ty.Sized, ...],
-        dtype=np.float32,
+    dicts, index_sets: ty.Tuple[ty.Sized, ...], dtype=np.float32
 ) -> np.ndarray:
 
     shape = tuple(len(ixset) for ixset in index_sets)
@@ -101,13 +97,10 @@ def dicts_to_ndarray(
     return out
 
 
-def ndarray_to_dicts(
-        arr,
-        index_sets: ty.Tuple[ty.Sized, ...],
-) -> ty.Dict:
-    '''
+def ndarray_to_dicts(arr, index_sets: ty.Tuple[ty.Sized, ...]) -> ty.Dict:
+    """
     The inverse of dicts_to_ndarray.
-    '''
+    """
 
     assert arr.ndim == len(index_sets)
 
@@ -141,40 +134,43 @@ class lparray(np.ndarray):
     @staticmethod
     def bin_and(prob: pp.LpProblem, name: str, out: lparray, *ins: lparray):
         for ix, _in in enumerate(ins):
-            (out <= _in).constrain(prob, f'{name}_and_ub{ix}')
-        (out >= sum(ins, 1 - len(ins))).constrain(prob, f'{name}_and_lb')
+            (out <= _in).constrain(prob, f"{name}_and_ub{ix}")
+        (out >= sum(ins, 1 - len(ins))).constrain(prob, f"{name}_and_lb")
 
     @staticmethod
     def bin_or(prob: pp.LpProblem, name: str, out: lparray, *ins: lparray):
         for ix, _in in enumerate(ins):
-            (out >= _in).constrain(prob, f'{name}_or_lb{ix}')
-        (out <= sum(ins)).constrain(prob, f'{name}_and_ub')
+            (out >= _in).constrain(prob, f"{name}_or_lb{ix}")
+        (out <= sum(ins)).constrain(prob, f"{name}_and_ub")
 
     @classmethod
     def create(cls, name: str, index_sets, *args, **kwargs) -> lparray:
-        '''
+        """
         Numpy array equivalent of pulp.LpVariable.dicts
-        '''
+        """
 
         if len(index_sets) == 0:
-            return np.array([pp.LpVariable(name, *args,
-                                           **kwargs)]).squeeze().view(lparray)
+            return (
+                np.array([pp.LpVariable(name, *args, **kwargs)])
+                .squeeze()
+                .view(lparray)
+            )
 
         if len(index_sets) == 1:
-            name = name + '('
+            name = name + "("
 
         def _rworker(name: str, plane: np.ndarray, index_sets):
             if len(index_sets) == 1:
-                close_paren = name and (')' if '(' in name else '')
+                close_paren = name and (")" if "(" in name else "")
                 for ix in number(index_sets[0]):
                     plane[ix] = pp.LpVariable(
-                        f'{name}{ix}{close_paren}', *args, **kwargs
+                        f"{name}{ix}{close_paren}", *args, **kwargs
                     )
             else:
-                open_paren = name and ('(' if '(' not in name else '')
+                open_paren = name and ("(" if "(" not in name else "")
                 for ix in number(index_sets[0]):
                     _rworker(
-                        f'{name}{open_paren}{ix},', plane[ix], index_sets[1:]
+                        f"{name}{open_paren}{ix},", plane[ix], index_sets[1:]
                     )
 
         arr = np.zeros(
@@ -190,7 +186,7 @@ class lparray(np.ndarray):
 
     @classmethod
     def create_anon(
-            cls, name: str, shape: ty.Tuple[int, ...], *args, **kwargs
+        cls, name: str, shape: ty.Tuple[int, ...], *args, **kwargs
     ) -> lparray:
         ixsets = tuple(list(range(d)) for d in shape)
         return cls.create(name, ixsets, *args, **kwargs)
@@ -202,10 +198,10 @@ class lparray(np.ndarray):
         return np.less_equal(self, other, dtype=object)
 
     def __lt__(self, other):
-        raise NotImplementedError('lparrays support only <=, >=, and ==')
+        raise NotImplementedError("lparrays support only <=, >=, and ==")
 
     def __gt__(self, other):
-        raise NotImplementedError('lparrays support only <=, >=, and ==')
+        raise NotImplementedError("lparrays support only <=, >=, and ==")
 
     def __eq__(self, other):
         return np.equal(self, other, dtype=object)
@@ -221,7 +217,7 @@ class lparray(np.ndarray):
     def constrain(self, prob: pp.LpProblem, name: str) -> None:
         if not isinstance(prob, pp.LpProblem):
             raise TypeError(
-                f'Trying to constrain a {type(prob)}. Did you pass prob?'
+                f"Trying to constrain a {type(prob)}. Did you pass prob?"
             )
         if self.ndim == 0:
             cons = self.item()
@@ -230,90 +226,88 @@ class lparray(np.ndarray):
             return
 
         if name and self.ndim == 1:
-            name = name + '('
+            name = name + "("
 
         def _rworker(prob, plane, name):
             if plane.ndim == 1:
-                close_paren = name and (')' if '(' in name else '')
+                close_paren = name and (")" if "(" in name else "")
                 for cx, const in enumerate(plane):
                     if not isinstance(const, pp.LpConstraint):
                         raise TypeError(
-                            'Attempting to constrain problem with '
-                            f'non-constraint {const}'
+                            "Attempting to constrain problem with "
+                            f"non-constraint {const}"
                         )
-                    const.name = name and f'{name}{cx}{close_paren}'
+                    const.name = name and f"{name}{cx}{close_paren}"
                     prob += const
             else:
-                open_paren = name and ('(' if '(' not in name else '')
+                open_paren = name and ("(" if "(" not in name else "")
                 for px, subplane in enumerate(plane):
-                    subname = name and f'{name}{open_paren}{px},'
+                    subname = name and f"{name}{open_paren}{px},"
                     _rworker(prob, subplane, subname)
 
         _rworker(prob, self, name)
 
     def abs(self, prob: pp.LpProblem, name: str, *args, bigM=1000):
-        '''
+        """
         Generate an array of affine expression equal to |self|.
 
         Generates 3 * self.size new variables.
-        '''
+        """
 
         # w == 1 <=> self <= 0
-        w = lparray.create_like(f'{name}_abs_aux', self, 0, 1, pp.LpBinary)
+        w = lparray.create_like(f"{name}_abs_aux", self, 0, 1, pp.LpBinary)
         # binding if self >= 0
-        (self <= bigM * (1 - w)).constrain(prob, f'{name}_lb')
+        (self <= bigM * (1 - w)).constrain(prob, f"{name}_lb")
         # binding if self <= 0
-        (self >= -bigM * w).constrain(prob, f'{name}_ub')
+        (self >= -bigM * w).constrain(prob, f"{name}_ub")
 
         # xp is the positive half of X, xm is the negative half of X
-        xp = lparray.create_like(f'{name}_absp', self, *args)
-        xm = lparray.create_like(f'{name}_absm', self, *args)
+        xp = lparray.create_like(f"{name}_absp", self, *args)
+        xm = lparray.create_like(f"{name}_absm", self, *args)
 
-        (xp >= 0).constrain(prob, f'{name}_abs_xplb')
-        (xm >= 0).constrain(prob, f'{name}_abs_xmlb')
-        (xp - xm == self).constrain(prob, f'{name}_absdecomp')
+        (xp >= 0).constrain(prob, f"{name}_abs_xplb")
+        (xm >= 0).constrain(prob, f"{name}_abs_xmlb")
+        (xp - xm == self).constrain(prob, f"{name}_absdecomp")
 
         # xp >= 0 <=> xm == 0 and vice versa
-        (xp <= bigM * (1 - w)).constrain(prob, f'{name}_absxpexcl')
-        (xm <= bigM * w).constrain(prob, f'{name}_absxmexcl')
+        (xp <= bigM * (1 - w)).constrain(prob, f"{name}_absxpexcl")
+        (xm <= bigM * w).constrain(prob, f"{name}_absxmexcl")
 
         return xp, xm
 
-    def logical_clip(
-            self, prob: pp.LpProblem, name: str, bigM=1000
-    ) -> lparray:
-        '''
+    def logical_clip(self, prob: pp.LpProblem, name: str, bigM=1000) -> lparray:
+        """
         Assumes self is integer >= 0.
 
         Returns an array of the same shape as self containing
             z_... = max(self_..., 1)
 
         Generates self.size new variables.
-        '''
+        """
 
         z = self.__class__.create(
             name, [range(x) for x in self.shape], 0, 1, pp.LpBinary
         )
 
-        (self >= z).constrain(prob, f'{name}_lb')
-        (self <= bigM * z).constrain(prob, f'{name}_ub')
+        (self >= z).constrain(prob, f"{name}_lb")
+        (self <= bigM * z).constrain(prob, f"{name}_ub")
 
         return z
 
     def _lp_minmax(
-            self,
-            name: str,
-            prob: pp.LpProblem,
-            which,
-            categ,
-            lb=None,
-            ub=None,
-            bigM=1000,
-            axis: ty.Union[None, int, ty.Tuple[int, ...]] = None,
+        self,
+        name: str,
+        prob: pp.LpProblem,
+        which,
+        categ,
+        lb=None,
+        ub=None,
+        bigM=1000,
+        axis: ty.Union[None, int, ty.Tuple[int, ...]] = None,
     ):
 
         if not np.product(self.shape):
-            raise ValueError('No variables given!')
+            raise ValueError("No variables given!")
 
         # if any(v.cat != categ for v in self.ravel()):
         #     raise ValueError(f'This function expects {categ} variables')
@@ -321,9 +315,12 @@ class lparray(np.ndarray):
         if axis is None:
             axis = tuple(range(self.ndim))
         elif isinstance(axis, int):
-            axis = (axis, )
-        elif (not isinstance(axis, tuple) or not axis
-              or any(not isinstance(ax, int) or ax < 0 for ax in axis)):
+            axis = (axis,)
+        elif (
+            not isinstance(axis, tuple)
+            or not axis
+            or any(not isinstance(ax, int) or ax < 0 for ax in axis)
+        ):
             raise TypeError("Axis must be a tuple of positive integers")
 
         if categ == pp.LpBinary:
@@ -332,16 +329,16 @@ class lparray(np.ndarray):
         elif lb is None or ub is None:
             assert 0, "Need to supply constraints for non-binary variables!"
 
-        assert which in ('min', 'max')
+        assert which in ("min", "max")
 
-        mmname = f'{name}_{which}'
-        aux_name = f'{name}_{which}_aux'
+        mmname = f"{name}_{which}"
+        aux_name = f"{name}_{which}_aux"
 
         # axes of self which the max is indexed by
         keep_axis = tuple(sorted(set(range(self.ndim)) - set(axis)))
 
         # array of maxes
-        minmax_shape = sum((self.shape[ax:ax + 1] for ax in keep_axis), ())
+        minmax_shape = sum((self.shape[ax : ax + 1] for ax in keep_axis), ())
         z = lparray.create_anon(mmname, minmax_shape, lb, ub, categ)
 
         # broadcastable version for comparison with self
@@ -355,22 +352,27 @@ class lparray(np.ndarray):
             aux_name, self, lowBound=0, upBound=1, cat=pp.LpBinary
         )
 
-        (w.sum(axis=axis) == 1).constrain(prob, f'{mmname}_auxsum')
+        (w.sum(axis=axis) == 1).constrain(prob, f"{mmname}_auxsum")
 
-        if which == 'max':
-            (z_br >= self).constrain(prob, f'{mmname}_lb')
-            (z_br <= self + bigM * (1 - w)).constrain(prob, f'{mmname}_ub')
-        elif which == 'min':
-            (z_br <= self).constrain(prob, f'{mmname}_ub')
-            (z_br >= self - bigM * (1 - w)).constrain(prob, f'{mmname}_lb')
+        if which == "max":
+            (z_br >= self).constrain(prob, f"{mmname}_lb")
+            (z_br <= self + bigM * (1 - w)).constrain(prob, f"{mmname}_ub")
+        elif which == "min":
+            (z_br <= self).constrain(prob, f"{mmname}_ub")
+            (z_br >= self - bigM * (1 - w)).constrain(prob, f"{mmname}_lb")
         else:
             assert 0
 
         return z
 
     def _lp_int_minmax(
-            self, name: str, prob: pp.LpProblem, which: str, lb: int, ub: int,
-            **kwargs
+        self,
+        name: str,
+        prob: pp.LpProblem,
+        which: str,
+        lb: int,
+        ub: int,
+        **kwargs,
     ) -> pp.LpVariable:
 
         if lb == 0 and ub == 1:
@@ -383,37 +385,36 @@ class lparray(np.ndarray):
         )
 
     def lp_int_max(
-            self, prob: pp.LpProblem, name: str, lb: int, ub: int, **kwargs
+        self, prob: pp.LpProblem, name: str, lb: int, ub: int, **kwargs
     ) -> pp.LpVariable:
         return self._lp_int_minmax(
-            prob, name, which='max', lb=lb, ub=ub, **kwargs
+            prob, name, which="max", lb=lb, ub=ub, **kwargs
         )
 
     def lp_int_min(
-            self, prob: pp.LpProblem, name: str, lb: int, ub: int, *args,
-            **kwargs
+        self, prob: pp.LpProblem, name: str, lb: int, ub: int, *args, **kwargs
     ) -> pp.LpVariable:
         return self._lp_int_minmax(
-            prob, name, which='min', lb=lb, ub=ub, **kwargs
+            prob, name, which="min", lb=lb, ub=ub, **kwargs
         )
 
     def lp_bin_max(self, prob: pp.LpProblem, name: str, *args, **kwargs):
         return self._lp_int_minmax(
-            prob, name, lb=0, ub=1, which='max', **kwargs
+            prob, name, lb=0, ub=1, which="max", **kwargs
         )
 
     def lp_bin_min(self, prob: pp.LpProblem, name: str, *args, **kwargs):
         return self._lp_int_minmax(
-            prob, name, lb=0, ub=1, which='min', **kwargs
+            prob, name, lb=0, ub=1, which="min", **kwargs
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    var = pp.LpVariable('Y', 0, 1, pp.LpBinary)
+    var = pp.LpVariable("Y", 0, 1, pp.LpBinary)
     c = var >= 0
 
-    X = lparray.create('X', ([1, 2, 3], ['a', 'b', 'c']), 0, 1, pp.LpBinary)
+    X = lparray.create("X", ([1, 2, 3], ["a", "b", "c"]), 0, 1, pp.LpBinary)
     Y = np.array([2, 3, 4])
 
     print(X * Y)
@@ -424,16 +425,16 @@ if __name__ == '__main__':
     print(con)
     print(vars(con))
 
-    prob = pp.LpProblem('foo')
-    con.constrain(prob, name='diag')
+    prob = pp.LpProblem("foo")
+    con.constrain(prob, name="diag")
 
     prob += X.sumit()
     print(prob)
 
-    prob = pp.LpProblem('foo')
-    z = X.lp_bin_max('rowmax', prob, axis=0)
+    prob = pp.LpProblem("foo")
+    z = X.lp_bin_max("rowmax", prob, axis=0)
     print(prob)
 
-    prob = pp.LpProblem('foo')
-    z = X.lp_bin_max('colmax', prob, axis=1)
+    prob = pp.LpProblem("foo")
+    z = X.lp_bin_max("colmax", prob, axis=1)
     print(prob)

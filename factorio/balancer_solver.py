@@ -12,17 +12,24 @@ import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
 
 from .solver_core import (
-    IllSpecified, Infeasible, dicts_to_ndarray, get_solver, in_sol_dir,
-    lparray, ndarray_to_dicts, number, numprod
+    IllSpecified,
+    Infeasible,
+    dicts_to_ndarray,
+    get_solver,
+    in_sol_dir,
+    lparray,
+    ndarray_to_dicts,
+    number,
+    numprod,
 )
 
-SOL_SUBDIR = './balancers/'
+SOL_SUBDIR = "./balancers/"
 
 
 def lowerbound_splitters(M: int, N: int) -> int:
-    '''
+    """
     Guesses a lower bound on the number of splitters needed for an M-N balancer
-    '''
+    """
 
     # special case
     if M == 1 and N == 1:
@@ -32,22 +39,22 @@ def lowerbound_splitters(M: int, N: int) -> int:
     W = ceil(M / 2)
 
     def min_by_height(h: int):
-        return max(W, ceil(N / (2**(H - h))))
+        return max(W, ceil(N / (2 ** (H - h))))
 
     return sum(min_by_height(h) for h in range(H))
-    # return H * W
 
 
 def solve_balancers(
-        M: int,
-        N: int,
-        max_spls: int,
-        min_spls: int,
-        debug=False,
-        exact_counts=False,
-        solver='gurobi',
+    *,
+    M: int,
+    N: int,
+    max_spls: int,
+    min_spls: int,
+    solver: pp.LpSolver,
+    debug=False,
+    exact_counts=False,
 ) -> np.ndarray:
-    '''
+    """
     Attempt to find a splitter-count optimal M -> N balancer for Factorio.
 
     More efficient than the naive expanded matrix approach, using "implicit"
@@ -55,13 +62,13 @@ def solve_balancers(
 
     Further optimized by restricting the search to N >= M and allowing only
     22 and 12 splitters.
-    '''
+    """
 
     if M > N:
         raise IllSpecified(
-            'The problem formulation only allows for fanout designs. '
-            'Note that an optimal N -> M solution can be reversed to give '
-            'what you want.'
+            "The problem formulation only allows for fanout designs. "
+            "Note that an optimal N -> M solution can be reversed to give "
+            "what you want."
         )
 
     if N == 1:
@@ -78,8 +85,8 @@ def solve_balancers(
     min_spls = max(lowerbound_splitters(M, N), min_spls)
     if max_spls < min_spls:
         raise Infeasible(
-            f'Balancing {M} -> {N} requires at least {min_spls}, which is '
-            'lower than the max given'
+            f"Balancing {M} -> {N} requires at least {min_spls}, which is "
+            "lower than the max given"
         )
 
     # special case needed for fixed Omap.
@@ -99,18 +106,18 @@ def solve_balancers(
     min_spls = max(min_spls, nsi0 + nso0)
 
     if not exact_counts:
-        print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
+        print(f"Solver/Info: n_splitters in [{min_spls}, {max_spls}].")
     else:
-        print(f'Solver/Info: solving with exactly {max_spls} splitters')
-    print(f'Solver/Info: {nsi0} input pinned; {nso0} output pinned')
+        print(f"Solver/Info: solving with exactly {max_spls} splitters")
+    print(f"Solver/Info: {nsi0} input pinned; {nso0} output pinned")
 
-    Inps = [f'i{ix}' for ix in range(M)]
-    Outs = [f'o{ix}' for ix in range(N)]
-    Splitters = [f's{ix}' for ix in range(max_spls)]
+    Inps = [f"i{ix}" for ix in range(M)]
+    Outs = [f"o{ix}" for ix in range(N)]
+    Splitters = [f"s{ix}" for ix in range(max_spls)]
 
     # splitters enabled
     if not exact_counts:
-        S = lparray.create("S", (Splitters, ), 0, 1, pp.LpBinary)
+        S = lparray.create("S", (Splitters,), 0, 1, pp.LpBinary)
     else:
         S = np.ones(len(Splitters), dtype=np.uint8)
 
@@ -120,7 +127,7 @@ def solve_balancers(
     # internal flows
     # Fs = pp.LpVariable.dicts("Fs", (Splitters, Splitters, Inps))
     Fs = lparray.create(
-        "Fs", (Splitters, Splitters, Inps), 0., 1., pp.LpContinuous
+        "Fs", (Splitters, Splitters, Inps), 0.0, 1.0, pp.LpContinuous
     )
 
     # Theorem 1. We can pack all inputs without loss of generality.
@@ -147,16 +154,20 @@ def solve_balancers(
         Omap[len(Splitters) - 1 - ix // 2, ix] = 1
 
     # input flows
-    Fi = lparray.create("Fi", (Inps, Splitters, Inps), 0., 1., pp.LpContinuous)
+    Fi = lparray.create(
+        "Fi", (Inps, Splitters, Inps), 0.0, 1.0, pp.LpContinuous
+    )
     # output flows
-    Fo = lparray.create("Fo", (Splitters, Outs, Inps), 0., 1., pp.LpContinuous)
+    Fo = lparray.create(
+        "Fo", (Splitters, Outs, Inps), 0.0, 1.0, pp.LpContinuous
+    )
 
     H = ceil(np.log2(N))
-    # TODO H + 3 is arbitrary, find a proper bound
-    MAX_RANK = H + 5
+    # TODO H + 2 is arbitrary, find a proper bound
+    MAX_RANK = H + 2
 
-    Ro = lparray.create("Ro", (Splitters, ), 0, MAX_RANK, pp.LpInteger)
-    Ri = lparray.create("Ri", (Splitters, ), 0, MAX_RANK, pp.LpInteger)
+    Ro = lparray.create("Ro", (Splitters,), 0, MAX_RANK, pp.LpInteger)
+    Ri = lparray.create("Ri", (Splitters,), 0, MAX_RANK, pp.LpInteger)
 
     prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
@@ -184,17 +195,19 @@ def solve_balancers(
         dest_cost = (Ro + MAX_RANK * (2 - Conn[u] - S))[ixarr]
         min_cost = dest_cost.lp_int_min(
             prob,
-            f'ORankMin_{u}',
+            f"ORankMin_{u}",
             lb=0,
             # from the max on dest_cost,
             # 0 <= min_cost <= 3 * MAX_RANK
             ub=3 * MAX_RANK,
         )
         # NOTE the rank of disabled splitters is unconstrained
-        (Ro[u:u + 1] >= 1 + min_cost - 4 * MAX_RANK *
-         (1 - S[u])).constrain(prob, f'ORankDef_{u}a')
-        (Ro[u:u + 1] <= 1 + min_cost + 4 * MAX_RANK *
-         (1 - S[u])).constrain(prob, f'ORankDef_{u}b')
+        (Ro[u : u + 1] >= 1 + min_cost - 4 * MAX_RANK * (1 - S[u])).constrain(
+            prob, f"ORankDef_{u}a"
+        )
+        (Ro[u : u + 1] <= 1 + min_cost + 4 * MAX_RANK * (1 - S[u])).constrain(
+            prob, f"ORankDef_{u}b"
+        )
 
     for u in number(Splitters)[nsi0:]:
         ixarr = np.ones(max_spls, dtype=bool)
@@ -202,15 +215,14 @@ def solve_balancers(
 
         source_cost = (Ri + MAX_RANK * (2 - Conn[:, u] - S))[ixarr]
         min_cost = source_cost.lp_int_min(
-            prob,
-            f'IRankMin_{u}',
-            lb=0,
-            ub=3 * MAX_RANK,
+            prob, f"IRankMin_{u}", lb=0, ub=3 * MAX_RANK
         )
-        (Ri[u:u + 1] >= 1 + min_cost - 4 * MAX_RANK *
-         (1 - S[u])).constrain(prob, f'IRankDef_{u}a')
-        (Ri[u:u + 1] <= 1 + min_cost + 4 * MAX_RANK *
-         (1 - S[u])).constrain(prob, f'IRankDef_{u}b')
+        (Ri[u : u + 1] >= 1 + min_cost - 4 * MAX_RANK * (1 - S[u])).constrain(
+            prob, f"IRankDef_{u}a"
+        )
+        (Ri[u : u + 1] <= 1 + min_cost + 4 * MAX_RANK * (1 - S[u])).constrain(
+            prob, f"IRankDef_{u}b"
+        )
 
     # ## CONSTRAINTS
     # # CHAPTER 0: CONNECTIVITY RESTRICTIONS
@@ -218,7 +230,7 @@ def solve_balancers(
     # each input must have at least ceil(lg(N)) between it and any output
     # this creates a trivial lower bound of (M // 2)ceil(lg(N)) splitters
     if not exact_counts:
-        (S.sum() >= min_spls).constrain(prob, 'MinSplitters')
+        (S.sum() >= min_spls).constrain(prob, "MinSplitters")
 
     # 0.1: SPLITTER SEPARATION THEOREMS
     # We adopt the following formalism:
@@ -241,16 +253,16 @@ def solve_balancers(
     #
     # 0.1.0 N > 4 SEPARATION THEOREM
     if N > 4:
-        print('Solver/Info: invoking N > 4 separation theorem.')
-        (Ro + Ri >= 2).constrain(prob, 'Sep4')
+        print("Solver/Info: invoking N > 4 separation theorem.")
+        (Ro + Ri >= 2).constrain(prob, "Sep4")
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
     #                i:o     0:2   1:1   2:0
     # Proof. As above.
     if N > 8:
-        print('Solver/Info: invoking N > 8 separation theorem.')
-        (Ro + Ri >= 3).constrain(prob, 'Sep8')
+        print("Solver/Info: invoking N > 8 separation theorem.")
+        (Ro + Ri >= 3).constrain(prob, "Sep8")
 
     # We can constrain the problem by forcing the input ranks to be ordered
     # among splitters that are not opinned. NOTE I don't believe we can always
@@ -258,41 +270,41 @@ def solve_balancers(
     # TODO both orank and irank ordering exclude known optimal solutions. Is
     # there a way to salvage this?
     # 0.2 ORANK ORDERING OF FREE SPLITTERS
-    (Ro[nsi0 + 1:] <= Ro[nsi0:-1]).constrain(prob, "RankOrdering")
+    (Ro[nsi0 + 1 :] <= Ro[nsi0:-1]).constrain(prob, "RankOrdering")
 
     assert min_spls >= nsotot + nsitot
 
     # 0.3: RESPECT PINS
     if not exact_counts:
-        (S[:nsitot] == 1).constrain(prob, 'InPins')
+        (S[:nsitot] == 1).constrain(prob, "InPins")
         if nsotot > 0:
-            (S[-nsotot:] == 1).constrain(prob, 'OutPins')
+            (S[-nsotot:] == 1).constrain(prob, "OutPins")
 
         # 0.4 UNPINNED SPLITTERS ARE ORDERED
-        Sl = S[nsitot:max_spls - nsotot - 1]
-        Su = S[nsitot + 1:max_spls - nsotot]
+        Sl = S[nsitot : max_spls - nsotot - 1]
+        Su = S[nsitot + 1 : max_spls - nsotot]
         (Sl >= Su).constrain(prob, "UnpinnedSplitterOrder")
 
-        print(f'Solver/Info: {len(Sl) + 1} unpinned splitters.')
+        print(f"Solver/Info: {len(Sl) + 1} unpinned splitters.")
 
         free_locked = max(0, min_spls - nsitot - nsotot)
         if free_locked > 0:
-            print(f'Solver/Info: {free_locked} unpinned splitters are locked')
+            print(f"Solver/Info: {free_locked} unpinned splitters are locked")
             (Sl[:free_locked] == 1).constrain(prob, "FreeLocked")
 
     out_from_spls = Omap.sum(axis=1)
     inp_into_spls = Imap.sum(axis=0)
 
     # 0.5 ENABLED SPLITTER OUPUTS WELL CONNECTED
-    (Conn.sum(axis=1) + out_from_spls <= 2 * S).constrain(prob, 'MaxOuts')
-    (Conn.sum(axis=1) + out_from_spls >= S).constrain(prob, 'MinOuts')
+    (Conn.sum(axis=1) + out_from_spls <= 2 * S).constrain(prob, "MaxOuts")
+    (Conn.sum(axis=1) + out_from_spls >= S).constrain(prob, "MinOuts")
 
     # 0.6 ENABLED SPLITTER INPUTS WELL CONNECTED
-    (Conn.sum(axis=0) + inp_into_spls <= 2 * S).constrain(prob, 'MaxIns')
-    (Conn.sum(axis=0) + inp_into_spls >= S).constrain(prob, 'MinIns')
+    (Conn.sum(axis=0) + inp_into_spls <= 2 * S).constrain(prob, "MaxIns")
+    (Conn.sum(axis=0) + inp_into_spls >= S).constrain(prob, "MinIns")
 
     # 0.7 NO SELF LOOPS
-    (np.diag(Conn) == 0).constrain(prob, 'NoSelfLoops')
+    (np.diag(Conn) == 0).constrain(prob, "NoSelfLoops")
 
     # Theorem 4:
     # Every solution has a linearization in which no node has two backedges.
@@ -319,54 +331,88 @@ def solve_balancers(
 
     # # CHAPTER 1: FLOW CONSTRAINTS
     # 1.0 RESPECT FLOW CAP
-    (Fs.sum(axis=2) <= Conn).constrain(prob, 'FlowCap')
+    (Fs.sum(axis=2) <= Conn).constrain(prob, "FlowCap")
 
     # 1.1 INFLOW EDGE CONDITIONS
     # forall i,v,t: F[i, v, t] == Imap[i, v] * 1[i == t]
-    (Fi == Imap[:, :, None] * np.eye(M)[:, None, :]).constrain(prob, 'InEdge')
+    (Fi == Imap[:, :, None] * np.eye(M)[:, None, :]).constrain(prob, "InEdge")
 
     # 1.2 OUTFLOW EDGE CONDITIONS
     # forall v,o,t: Fo[v, o, t] == Omap[v, o] / N
-    (N * Fo == Omap[..., None]).constrain(prob, 'OutEdge')
+    (N * Fo == Omap[..., None]).constrain(prob, "OutEdge")
 
     # 1.3 PROPER FLOW
-    (Fs >= 0).constrain(prob, 'ProperFlowS')
-    (Fi >= 0).constrain(prob, 'ProperFlowI')
-    (Fo >= 0).constrain(prob, 'ProperFlowO')
+    (Fs >= 0).constrain(prob, "ProperFlowS")
+    (Fi >= 0).constrain(prob, "ProperFlowI")
+    (Fo >= 0).constrain(prob, "ProperFlowO")
 
     # 1.4 INCOMPRESSIBILITY
     inflows = Fs.sum(axis=0) + Fi.sum(axis=0)  # (spls, types)
     outflows = Fs.sum(axis=1) + Fo.sum(axis=1)  # (spls, types)
-    (inflows == outflows).constrain(prob, 'Incompressibility')
+    (inflows == outflows).constrain(prob, "Incompressibility")
 
     # 1.5 EQUAL SPLITTING
     # forall s,w,t: 2 * Fs[s, w, t] <= inflow[s, t]
-    (2 * Fs <= inflows[:, None, :]).constrain(prob, 'SplittingS')
+    (2 * Fs <= inflows[:, None, :]).constrain(prob, "SplittingS")
     # forall s,o,t: 2 * Fo[s, o, t] <= inflow[s, t]
-    (2 * Fo <= inflows[:, None, :]).constrain(prob, 'SplittingO')
+    (2 * Fo <= inflows[:, None, :]).constrain(prob, "SplittingO")
 
-    # 1.5 RANK-BASED FLOW RESTRICTIONS
-    # Ro[u] <= 1 => F[u, w, t] <= (2 / N)
-    # Ro[u] <= 2 => F[u, w, t] <= (4 / N)
-    # ...
-    # By the same arguments as theorem 3
-    # 1.5.1 N > 4 FLOW RESTRICTIONS
-    if 8 >= N > 4:
-        # xp >= 1 iff Ro <= 1
-        xp, _ = (2 - Ro).abs(  # type: ignore
-            prob, 'FlowThin4Abs', 0, MAX_RANK, pp.LpInteger
-        )  # type: ignore
-        ro_le_one = xp.logical_clip(prob)
-        (N * Fs[:, :, :] <= 2 + 100 *
-         (1 - ro_le_one)[:, None, None]).constrain(prob, 'FlowThin4')
+    # 1.5 FLOW THINNING RESTRICTIONS
+    # ∀ t, w:
+    # Ro[u] <= 1 => Fs[u, w, t] <= (2 / N)
+    # Ro[u] <= 2 => Fs[u, w, t] <= (4 / N)
+    # Ro[u] <= k => Fs[u, w, t] <= (2**k / N)
+    # By the same argument as Theorem 3.
+    #
+    # 1.5.0 Ro <= 1 FLOW THINNING
+    def impose_flow_thinning(rank):
+        # xp >= 1 iff Ro <= rank
+        limit = 2 ** rank
+        xp, _ = (-Ro + rank + 1).abs(
+            prob, f"FlowThin{rank}Abs", 0, MAX_RANK, pp.LpInteger
+        )
+        ro_le_rank = xp.logical_clip(prob, f"FlowThin{rank}Lclip")
+        (
+            N * Fs[:, :, :]
+            <= limit + (N - limit) * (1 - ro_le_rank)[:, None, None]
+        ).constrain(prob, f"FlowThin{rank}")
 
-    # # 1.5.1 N > 8 FLOW RESTRICTIONS
-    # if N > 8:
-    #     # xm >= 1 iff Ro <= 2
-    #     xp, _ = (3 - Ro).abs(prob, 'FlowThin8Abs')  # type: ignore
-    #     ro_ge_one = xp.logical_clip()
-    #     (N * Fs[:, :, :] <= 4 + N *
-    #      (1 - ro_ge_one)[None, :, None]).constrain(prob, 'FlowThin8')
+    if N > 2:
+        impose_flow_thinning(1)
+    # 1.5.1 Ro <= 2 FLOW THINNING
+    if N > 4:
+        impose_flow_thinning(2)
+    # 1.5.2 Ro <= FLOW THINNING
+    if N > 8:
+        impose_flow_thinning(3)
+
+    # TODO EXPERIMENTAL
+    # Flow covering theorems:
+    # ∀ u: |{t | F[u, v, t] > 0}| <= 2 ** (Ri[u] + 1)
+    #
+    # 1.6 FLOW COVERING THEOREMS
+    # 1.6.0 Ri <= 0 FLOW COVERING
+    def impose_flow_covering(rank):
+        limit = 2 ** (rank + 1)
+        cover = lparray.create_anon(
+            f"FlowCover{rank}Aux", (max_spls, M), 0, 1, pp.LpBinary
+        )
+        (cover.sum(axis=1) <= limit).constrain(prob, f"FlowCover{rank}Limit")
+        # xp >= 1 => Ri <= rank
+        xp, _ = (-Ri + rank + 1).abs(
+            prob, f"FlowCover{rank}Abs", 0, MAX_RANK, pp.LpInteger
+        )
+        ri_le_rank = xp.logical_clip(prob, f"FlowCover{rank}Lclip")
+        (
+            Fs[:, :, :] <= cover[:, None, :] + (1 - ri_le_rank[:, None, None])
+        ).constrain(prob, f"FlowCover{rank}")
+
+    # if M > 2:
+    #     impose_flow_covering(0)
+    # if M > 4:
+    #     impose_flow_covering(1)
+    # if M > 8:
+    #     impose_flow_covering(2)
 
     # ## OBJECTIVE
     # #
@@ -385,19 +431,21 @@ def solve_balancers(
         # penalize jumps forward
         for sj in range(ix + 1, max_spls):
             objective += (sj - si) * Conn[si, sj]
-        # penalize orank disorder
-        objective += (Ri[:-1] - Ri[1:])
+        # penalize irank disorder
+        # TODO check if this helps with convergence time
+        # objective += Ri[:-1] - Ri[1:]
 
     prob += objective
 
     # ## SOLVING
     # #
-    prob.solve(solver=get_solver(which=solver))
-
-    if 'Infeasible' in pp.LpStatus[prob.status]:
+    prob.solve(solver)
+    if "Infeasible" == pp.LpStatus[prob.status]:
         raise Infeasible
+    if "Not Solved" == pp.LpStatus[prob.status]:
+        raise KeyboardInterrupt
 
-    optimal = 'Optimal' == pp.LpStatus[prob.status]
+    optimal = "Optimal" == pp.LpStatus[prob.status]
 
     if not exact_counts:
         keep_rows = np.where(S.values > 0)[0]
@@ -405,7 +453,7 @@ def solve_balancers(
         keep_rows = np.arange(max_spls, dtype=np.int32)
 
     adjmat = Conn.values[np.ix_(keep_rows, keep_rows)]
-    labels = [*map(lambda x: f's{x}', range(len(adjmat)))]
+    labels = [*map(lambda x: f"s{x}", range(len(adjmat)))]
 
     orank = Ro.values[keep_rows].astype(np.uint8)
     irank = Ri.values[keep_rows].astype(np.uint8)
@@ -422,13 +470,13 @@ def solve_balancers(
 
 
 def draw_solution(
-        imap: np.ndarray,
-        omap: np.ndarray,
-        splmat: np.ndarray,
-        labels=None,
-        graphname='graph.png',
-        orank=None,
-        irank=None,
+    imap: np.ndarray,
+    omap: np.ndarray,
+    splmat: np.ndarray,
+    labels=None,
+    graphname="graph.png",
+    orank=None,
+    irank=None,
 ) -> None:
 
     n_inps = imap.shape[0]
@@ -447,39 +495,37 @@ def draw_solution(
     #  |____|__________|___|
     #  | 0  |     0    | 0 |
     #  |____|__________|___|
-    full_adjmat = np.zeros(
-        (n_inps + n_spls + n_outs, ) * 2,
-        dtype=np.uint8,
-    )
+    full_adjmat = np.zeros((n_inps + n_spls + n_outs,) * 2, dtype=np.uint8)
     full_adjmat[:n_inps, n_inps:-n_outs] = imap
     full_adjmat[n_inps:-n_outs, n_inps:-n_outs] = splmat
     full_adjmat[n_inps:-n_outs, -n_outs:] = omap
 
-    g = nx.convert_matrix.from_numpy_array(
-        full_adjmat, create_using=nx.DiGraph
-    )
+    g = nx.convert_matrix.from_numpy_array(full_adjmat, create_using=nx.DiGraph)
 
-    orank_labels = [f':o{r}'
-                    for r in orank] if orank is not None else [''] * n_spls
-    irank_labels = [f'i{r}:'
-                    for r in irank] if irank is not None else [''] * n_spls
+    orank_labels = (
+        [f":o{r}" for r in orank] if orank is not None else [""] * n_spls
+    )
+    irank_labels = (
+        [f"i{r}:" for r in irank] if irank is not None else [""] * n_spls
+    )
 
     if labels is not None:
         g = nx.relabel_nodes(
-            g, {
+            g,
+            {
                 ix + n_inps: irank_labels[ix] + label + orank_labels[ix]
                 for ix, label in enumerate(labels)
-            }
+            },
         )
 
-    values = ['red'] * n_inps + ['black'] * n_spls + ['blue'] * n_outs
+    values = ["red"] * n_inps + ["black"] * n_spls + ["blue"] * n_outs
 
     for ndx, (_, attrs) in enumerate(g.nodes(data=True)):
-        attrs['fillcolor'] = attrs['color'] = values[ndx]
+        attrs["fillcolor"] = attrs["color"] = values[ndx]
 
     A = to_agraph(g)
-    A.layout('dot')
-    A.draw(graphname + '.png')
+    A.layout("dot")
+    A.draw(graphname + ".png")
 
 
 def main():
@@ -487,49 +533,53 @@ def main():
 
     parser = ArgumentParser()
 
-    parser.add_argument('M', type=int, help='number of inputs')
-    parser.add_argument('N', type=int, help='number of outputs')
+    parser.add_argument("M", type=int, help="number of inputs")
+    parser.add_argument("N", type=int, help="number of outputs")
     parser.add_argument(
-        '--maxs',
+        "--maxs",
         type=int,
         default=None,
-        help='max number of splitters to consider'
+        help="max number of splitters to consider",
     )
     parser.add_argument(
-        '--mins',
+        "--mins",
         type=int,
         default=0,
-        help='minimum number of splitters to consider'
+        help="minimum number of splitters to consider",
     )
     parser.add_argument(
-        '--maxb',
-        type=int,
-        default=None,
-        help='max number of backedges',
+        "--maxb", type=int, default=None, help="max number of backedges"
     )
     parser.add_argument(
-        '--exact',
-        action='store_true',
-        help='splitter counts are treated as exact instead of as upper bounds'
+        "--exact",
+        action="store_true",
+        help="splitter counts are treated as exact instead of as upper bounds",
     )
     parser.add_argument(
-        '--solver', type=str, default='gurobi', help='specify the solver'
+        "--solver", type=str, default="gurobi", help="specify the solver"
     )
     parser.add_argument(
-        '--reverse',
-        action='store_true',
-        help='draw a reversed graph of the solution'
+        "--reverse",
+        action="store_true",
+        help="draw a reversed graph of the solution",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress logging by the invoked solver",
     )
 
     args = parser.parse_args()
     do_iterate = False
 
-    print(f'Solving the optimal {args.M} -> {args.N} balancer...')
+    print(f"Solving the optimal {args.M} -> {args.N} balancer...")
     if args.maxs is None:
-        print('No max given: iterating from minimum')
+        print("No max given: iterating from minimum")
         args.maxs = max(args.mins, lowerbound_splitters(args.M, args.N))
         args.mins = args.maxs
         do_iterate = True
+
+    solver = get_solver(which=args.solver, verbose=not args.quiet)
 
     while True:
         try:
@@ -542,27 +592,27 @@ def main():
                 labels,
                 optimal,
             ) = solve_balancers(
-                args.M,
-                args.N,
+                M=args.M,
+                N=args.N,
                 max_spls=args.maxs,
                 min_spls=args.mins,
+                solver=solver,
                 exact_counts=args.exact or do_iterate,
-                solver=args.solver,
             )
         except (Infeasible, IllSpecified) as e:
-            print(f'No feasible solution within the given splitter limits:')
+            print(f"No feasible solution within the given splitter limits:")
             print(str(e))
             if not do_iterate:
                 return
             else:
                 args.maxs += 1
                 args.mins += 1
-                print(f'Trying again with exactly {args.maxs} splitters')
+                print(f"Trying again with exactly {args.maxs} splitters")
                 continue
         break
 
     graphname = (
-        f'bal_{args.M}-{args.N}'
+        f"bal_{args.M}-{args.N}"
         f'{("-ge" + str(args.maxs)) if args.exact else ""}'
         f'{("-mbe" + str(args.maxb)) if args.maxb else ""}'
         f'{"-subopt" if not optimal else ""}'
@@ -570,11 +620,9 @@ def main():
     graphname = str(in_sol_dir(SOL_SUBDIR + graphname))
 
     if optimal:
-        print(f'Solver: found optimal solution with {len(adjmat)} splitters')
+        print(f"Solver: found optimal solution with {len(adjmat)} splitters")
     else:
-        print(
-            f'Solver: found SUBOPTIMAL solution with {len(adjmat)} splitters'
-        )
+        print(f"Solver: found SUBOPTIMAL solution with {len(adjmat)} splitters")
 
     draw_solution(
         imap,
@@ -585,11 +633,11 @@ def main():
         orank=orank,
         irank=irank,
     )
-    print(f'solution saved to {graphname}.png')
+    print(f"solution saved to {graphname}.png")
 
-    np.save(f'{graphname}.npy', adjmat)
-    print(f'adjmat saved to {graphname}.npy')
+    np.save(f"{graphname}.npy", adjmat)
+    print(f"adjmat saved to {graphname}.npy")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
