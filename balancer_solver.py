@@ -45,7 +45,7 @@ def solve_balancers(
         min_spls: int,
         debug=False,
         exact_counts=False,
-        solver='coin',
+        solver='gurobi',
 ) -> np.ndarray:
     '''
     Attempt to find a splitter-count optimal M -> N balancer for Factorio.
@@ -57,13 +57,22 @@ def solve_balancers(
     22 and 12 splitters.
     '''
 
-    bigM = 10000
-
     if M > N:
         raise IllSpecified(
             'The problem formulation only allows for fanout designs. '
             'Note that an optimal N -> M solution can be reversed to give '
             'what you want.'
+        )
+
+    if N == 1:
+        return (
+            np.zeros((1, 0)),
+            np.zeros((0, 1)),
+            np.zeros((0, 0)),
+            np.zeros(0),
+            np.zeros(0),
+            list(),
+            True,
         )
 
     min_spls = max(lowerbound_splitters(M, N), min_spls)
@@ -88,6 +97,12 @@ def solve_balancers(
     # we must have at least the input and output pinned splitters
     # this can be better than the previous lower bound for some M, N
     min_spls = max(min_spls, nsi0 + nso0)
+
+    if not exact_counts:
+        print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
+    else:
+        print(f'Solver/Info: solving with exactly {max_spls} splitters')
+    print(f'Solver/Info: {nsi0} input pinned; {nso0} output pinned')
 
     Inps = [f'i{ix}' for ix in range(M)]
     Outs = [f'o{ix}' for ix in range(N)]
@@ -138,33 +153,64 @@ def solve_balancers(
 
     H = ceil(np.log2(N))
     # TODO H + 3 is arbitrary, find a proper bound
-    r_max = H + 3
+    MAX_RANK = H + 5
 
-    Ro = lparray.create("Ro", (Splitters, ), 0, r_max, pp.LpInteger)
-    Ri = lparray.create("Ri", (Splitters, ), 0, r_max, pp.LpInteger)
+    Ro = lparray.create("Ro", (Splitters, ), 0, MAX_RANK, pp.LpInteger)
+    Ri = lparray.create("Ri", (Splitters, ), 0, MAX_RANK, pp.LpInteger)
 
     prob = pp.LpProblem(name="solve_balancer", sense=pp.LpMinimize)
 
     # Ro gives the "out rank" (orank) of a node. The out rank is defined as the
     # shortest distance from the node to one of the outputs, measured in
     # intermediate nodes.
-    # The output nodes have orank 0 by definition
+    # The edge nodes have rank 0 by definition
+    # NOTE we do not constrain other nodes to allow non-existing splitters
+    # to take rank 0, which is required (I strongly suspect based on testing)
+    # for correct feasibility.
     (Ro[-nso0:] == 0).constrain(prob, "ORankEdge")
-    rosum = Ro[:-nso0, None] + 100 * (1 - Conn[:-nso0])
-    romin = 1 + rosum.lp_int_min(prob, 'ORankMin', lb=0, ub=r_max, axis=1)
-    (Ro[:-nso0] == romin).constrain(prob, 'ORankDef')
+    (Ri[:nsi0] == 0).constrain(prob, "IRankEdge")
 
-    # Ri is the input rank. Everything is by analogy to Ro
-    # (Ri[:nsi0] == 0).constrain(prob, "IRankEdge")
-    # risum = Ri[None, nsi0:] + 100 * (1 - Conn[:, nsi0:])
-    # rimin = 1 + risum.lp_int_min(prob, 'IRankMin', lb=0, ub=r_max, axis=0)
-    # (Ri[nsi0:] == rimin).constrain(prob, 'IRankDef')
+    # The orank of a node is 1 + the min orank of its descendants
+    # We need to exclude the impredicative case of Rx[u] = 1 + min( ..., Rx[u]
+    # + xxx, ...), or there is no feasible region
+    # NOTE as much as I love to be clever, this is much clearer than freaky
+    # array tricks.
 
-    if not exact_counts:
-        print(f'Solver/Info: n_splitters in [{min_spls}, {max_spls}].')
-    else:
-        print(f'Solver/Info: solving with exactly {max_spls} splitters')
-    print(f'Solver/Info: {nsi0} input pinned; ' f'{nso0} output pinned')
+    for u in number(Splitters)[:-nso0]:
+        ixarr = np.ones(max_spls, dtype=bool)
+        ixarr[u] = False
+
+        # 0 <= dest cost <= 3 * MAX_RANK
+        dest_cost = (Ro + MAX_RANK * (2 - Conn[u] - S))[ixarr]
+        min_cost = dest_cost.lp_int_min(
+            prob,
+            f'ORankMin_{u}',
+            lb=0,
+            # from the max on dest_cost,
+            # 0 <= min_cost <= 3 * MAX_RANK
+            ub=3 * MAX_RANK,
+        )
+        # NOTE the rank of disabled splitters is unconstrained
+        (Ro[u:u + 1] >= 1 + min_cost - 4 * MAX_RANK *
+         (1 - S[u])).constrain(prob, f'ORankDef_{u}a')
+        (Ro[u:u + 1] <= 1 + min_cost + 4 * MAX_RANK *
+         (1 - S[u])).constrain(prob, f'ORankDef_{u}b')
+
+    for u in number(Splitters)[nsi0:]:
+        ixarr = np.ones(max_spls, dtype=bool)
+        ixarr[u] = False
+
+        source_cost = (Ri + MAX_RANK * (2 - Conn[:, u] - S))[ixarr]
+        min_cost = source_cost.lp_int_min(
+            prob,
+            f'IRankMin_{u}',
+            lb=0,
+            ub=3 * MAX_RANK,
+        )
+        (Ri[u:u + 1] >= 1 + min_cost - 4 * MAX_RANK *
+         (1 - S[u])).constrain(prob, f'IRankDef_{u}a')
+        (Ri[u:u + 1] <= 1 + min_cost + 4 * MAX_RANK *
+         (1 - S[u])).constrain(prob, f'IRankDef_{u}b')
 
     # ## CONSTRAINTS
     # # CHAPTER 0: CONNECTIVITY RESTRICTIONS
@@ -196,34 +242,33 @@ def solve_balancers(
     # 0.1.0 N > 4 SEPARATION THEOREM
     if N > 4:
         print('Solver/Info: invoking N > 4 separation theorem.')
-        (Ro + Ri >= 3).constrain(prob, 'Sep4')
-        # (Ro[:, 1] + Ri[:, 0] <= 1).constrain(prob, 'Sep4_10')
-        # (Ro[:, 0] + Ri[:, 1] <= 1).constrain(prob, 'Sep4_01')
-        # lparray.abs_ge(prob, 'Sep4_10', Ro[:, 1] - Ri[:, 0], 1)
-        # lparray.abs_ge(prob, 'Sep4_01', Ro[:, 0] - Ri[:, 1], 1)
+        (Ro + Ri >= 2).constrain(prob, 'Sep4')
 
     # Extension 3.1.
     # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
     #                i:o     0:2   1:1   2:0
     # Proof. As above.
     if N > 8:
-        # (Ro[:, 2] + Ri[:, 0] <= 1).constrain(prob, 'Sep8_20')
-        # (Ro[:, 1] + Ri[:, 1] <= 1).constrain(prob, 'Sep8_11')
-        # (Ro[:, 0] + Ri[:, 2] <= 1).constrain(prob, 'Sep8_02')
-        (Ro + Ri >= 4).constrain(prob, 'Sep8')
-        # lparray.abs_ge(prob, 'Sep8_20', Ro[:, 2] - Ri[:, 0], 1)
-        # lparray.abs_ge(prob, 'Sep4_11', Ro[:, 1] - Ri[:, 1], 1)
-        # lparray.abs_ge(prob, 'Sep4_02', Ro[:, 0] - Ri[:, 2], 1)
+        print('Solver/Info: invoking N > 8 separation theorem.')
+        (Ro + Ri >= 3).constrain(prob, 'Sep8')
+
+    # We can constrain the problem by forcing the input ranks to be ordered
+    # among splitters that are not opinned. NOTE I don't believe we can always
+    # force both iranks and oranks to be ordered...
+    # TODO both orank and irank ordering exclude known optimal solutions. Is
+    # there a way to salvage this?
+    # 0.2 ORANK ORDERING OF FREE SPLITTERS
+    (Ro[nsi0 + 1:] <= Ro[nsi0:-1]).constrain(prob, "RankOrdering")
 
     assert min_spls >= nsotot + nsitot
 
-    # 0.2: RESPECT PINS
+    # 0.3: RESPECT PINS
     if not exact_counts:
         (S[:nsitot] == 1).constrain(prob, 'InPins')
         if nsotot > 0:
             (S[-nsotot:] == 1).constrain(prob, 'OutPins')
 
-        # 0.3 UNPINNED SPLITTERS ARE ORDERED
+        # 0.4 UNPINNED SPLITTERS ARE ORDERED
         Sl = S[nsitot:max_spls - nsotot - 1]
         Su = S[nsitot + 1:max_spls - nsotot]
         (Sl >= Su).constrain(prob, "UnpinnedSplitterOrder")
@@ -238,15 +283,15 @@ def solve_balancers(
     out_from_spls = Omap.sum(axis=1)
     inp_into_spls = Imap.sum(axis=0)
 
-    # 0.4 ENABLED SPLITTER OUPUTS WELL CONNECTED
+    # 0.5 ENABLED SPLITTER OUPUTS WELL CONNECTED
     (Conn.sum(axis=1) + out_from_spls <= 2 * S).constrain(prob, 'MaxOuts')
     (Conn.sum(axis=1) + out_from_spls >= S).constrain(prob, 'MinOuts')
 
-    # 0.5 ENABLED SPLITTER INPUTS WELL CONNECTED
+    # 0.6 ENABLED SPLITTER INPUTS WELL CONNECTED
     (Conn.sum(axis=0) + inp_into_spls <= 2 * S).constrain(prob, 'MaxIns')
     (Conn.sum(axis=0) + inp_into_spls >= S).constrain(prob, 'MinIns')
 
-    # 0.6 NO SELF LOOPS
+    # 0.7 NO SELF LOOPS
     (np.diag(Conn) == 0).constrain(prob, 'NoSelfLoops')
 
     # Theorem 4:
@@ -269,14 +314,8 @@ def solve_balancers(
     # |Gl| has shrunk by at least 1 since the new node at k, picked to have a
     # child in Gh, has at most one backedge. We repeat this procedure until
     # |Gl| == 0.
-    #
-    # 0.7 NO DOUBLE BACKEDGES
-    mask = np.tril(np.ones((max_spls, max_spls), dtype=np.uint8), k=-1)
-    ((Conn * mask).sum(axis=1) <= 1).constrain(prob, "NoDoubleBackedges")
-    # XXX we can alternatively apply this logic to nodes with two "backinputs"
-    # essentially reversing the arrows. But can we conclude both
-    # simulateneously, and say that no node has eight two backedges or two
-    # backinputs? I suspect no...
+    # NOTE empirically, it appears the presolversolver infers this from
+    # the output rank ordering condition
 
     # # CHAPTER 1: FLOW CONSTRAINTS
     # 1.0 RESPECT FLOW CAP
@@ -306,6 +345,29 @@ def solve_balancers(
     # forall s,o,t: 2 * Fo[s, o, t] <= inflow[s, t]
     (2 * Fo <= inflows[:, None, :]).constrain(prob, 'SplittingO')
 
+    # 1.5 RANK-BASED FLOW RESTRICTIONS
+    # Ro[u] <= 1 => F[u, w, t] <= (2 / N)
+    # Ro[u] <= 2 => F[u, w, t] <= (4 / N)
+    # ...
+    # By the same arguments as theorem 3
+    # 1.5.1 N > 4 FLOW RESTRICTIONS
+    if 8 >= N > 4:
+        # xp >= 1 iff Ro <= 1
+        xp, _ = (2 - Ro).abs(  # type: ignore
+            prob, 'FlowThin4Abs', 0, MAX_RANK, pp.LpInteger
+        )  # type: ignore
+        ro_le_one = xp.logical_clip(prob)
+        (N * Fs[:, :, :] <= 2 + 100 *
+         (1 - ro_le_one)[:, None, None]).constrain(prob, 'FlowThin4')
+
+    # # 1.5.1 N > 8 FLOW RESTRICTIONS
+    # if N > 8:
+    #     # xm >= 1 iff Ro <= 2
+    #     xp, _ = (3 - Ro).abs(prob, 'FlowThin8Abs')  # type: ignore
+    #     ro_ge_one = xp.logical_clip()
+    #     (N * Fs[:, :, :] <= 4 + N *
+    #      (1 - ro_ge_one)[None, :, None]).constrain(prob, 'FlowThin8')
+
     # ## OBJECTIVE
     # #
     objective = pp.LpAffineExpression()
@@ -317,12 +379,14 @@ def solve_balancers(
     # search-biasing objective terms
     # XXX ideally these will be subsumed into the layout problem
     for si in number(Splitters):
-        # penalize "backjumps"
+        # penalize jumps back
         for sj in range(ix):
             objective += (si - sj) * Conn[si, sj]
-        # penalize "jumps"
+        # penalize jumps forward
         for sj in range(ix + 1, max_spls):
             objective += (sj - si) * Conn[si, sj]
+        # penalize orank disorder
+        objective += (Ri[:-1] - Ri[1:])
 
     prob += objective
 
@@ -334,7 +398,6 @@ def solve_balancers(
         raise Infeasible
 
     optimal = 'Optimal' == pp.LpStatus[prob.status]
-    print(optimal)
 
     if not exact_counts:
         keep_rows = np.where(S.values > 0)[0]
@@ -342,10 +405,10 @@ def solve_balancers(
         keep_rows = np.arange(max_spls, dtype=np.int32)
 
     adjmat = Conn.values[np.ix_(keep_rows, keep_rows)]
-    labels = np.array(Splitters)[keep_rows]
+    labels = [*map(lambda x: f's{x}', range(len(adjmat)))]
 
-    orank = np.argmax(Ro.values[keep_rows], axis=1)
-    irank = np.argmax(Ri.values[keep_rows], axis=1)
+    orank = Ro.values[keep_rows].astype(np.uint8)
+    irank = Ri.values[keep_rows].astype(np.uint8)
 
     return (
         Imap[:, keep_rows],
@@ -421,7 +484,6 @@ def draw_solution(
 
 def main():
     from argparse import ArgumentParser
-    import sys
 
     parser = ArgumentParser()
 
@@ -459,7 +521,7 @@ def main():
         help='draw a reversed graph of the solution'
     )
 
-    args = parser.parse_args(sys.argv[1:])
+    args = parser.parse_args()
     do_iterate = False
 
     print(f'Solving the optimal {args.M} -> {args.N} balancer...')
@@ -506,6 +568,13 @@ def main():
         f'{"-subopt" if not optimal else ""}'
     )
     graphname = str(in_sol_dir(SOL_SUBDIR + graphname))
+
+    if optimal:
+        print(f'Solver: found optimal solution with {len(adjmat)} splitters')
+    else:
+        print(
+            f'Solver: found SUBOPTIMAL solution with {len(adjmat)} splitters'
+        )
 
     draw_solution(
         imap,

@@ -37,11 +37,13 @@ def in_sol_dir(fn: str) -> Path:
 SOLVER_FALLBACK = ['gurobi', 'coin', 'glpk']
 
 
-def get_solver(which='coin', threads: int = None, _fallback=None):
+def get_solver(
+        which='coin', threads: int = None, _fallback=None, verbose=True
+):
     threads = threads or os.cpu_count() or 1
     if which == 'coin':
         return pp.solvers.COIN_CMD(
-            msg=1,
+            msg=int(verbose),
             threads=threads,
         )
     if which == 'coinmp':
@@ -52,6 +54,8 @@ def get_solver(which='coin', threads: int = None, _fallback=None):
         solver = pp.solvers.GUROBI(
             threads=threads,
             display_interval=60,
+            mipgap=1e-6,
+            outputflag=int(verbose),
         )
     else:
         solver = None
@@ -146,19 +150,15 @@ class lparray(np.ndarray):
             (out >= _in).constrain(prob, f'{name}_or_lb{ix}')
         (out <= sum(ins)).constrain(prob, f'{name}_and_ub')
 
-    @staticmethod
-    def abs_ge(prob: pp.LpProblem, name: str, x: lparray, lim, bigM=1000):
-
-        b = pp.LpVariable(f'{name}_b', 0, 1, pp.LpBinary)
-
-        ((x + bigM * b) >= lim).constrain(prob, f'{name}_ub')
-        ((-x + bigM * (1 - b)) >= lim).constrain(prob, f'{name}_lb')
-
     @classmethod
     def create(cls, name: str, index_sets, *args, **kwargs) -> lparray:
         '''
         Numpy array equivalent of pulp.LpVariable.dicts
         '''
+
+        if len(index_sets) == 0:
+            return np.array([pp.LpVariable(name, *args,
+                                           **kwargs)]).squeeze().view(lparray)
 
         if len(index_sets) == 1:
             name = name + '('
@@ -251,13 +251,40 @@ class lparray(np.ndarray):
 
         _rworker(prob, self, name)
 
-    def logical_clip(self, prob: pp.LpProblem, bigM=10000) -> lparray:
+    def abs(self, prob: pp.LpProblem, name: str, *args, bigM=1000):
+        '''
+        Generate an array of affine expression equal to |self|.
+
+        Generates 3 * self.size new variables.
+        '''
+
+        # w == 1 <=> self <= 0
+        w = lparray.create_like(f'{name}_abs_aux', self, 0, 1, pp.LpBinary)
+        (self <= -bigM * (1 - w)).constrain(prob, f'{name}_lb')
+        (self >= bigM * w).constrain(prob, f'{name}_ub')
+
+        # xp is the positive half of X, xm is the negative half of X
+        xp = lparray.create_like(f'{name}_absp', self, *args)
+        xm = lparray.create_like(f'{name}_absm', self, *args)
+
+        (xp >= 0).constrain(prob, f'{name}_abs_xplb')
+        (xm >= 0).constrain(prob, f'{name}_abs_xmlb')
+        (xp - xm == self).constrain(prob, f'{name}_absdecomp')
+
+        # xp >= 0 <=> xm == 0 and vice versa
+        (xp <= bigM * (1 - w)).constrain(prob, f'{name}_absxpexcl')
+        (xm <= bigM * w).constrain(prob, f'{name}_absxmexcl')
+
+        return xp, xm
+
+    def logical_clip(self, prob: pp.LpProblem, bigM=1000) -> lparray:
         '''
         Assumes self is integer >= 0.
 
         Returns an array of the same shape as self containing
             z_... = max(self_..., 1)
-        using the big M method
+
+        Generates self.size new variables.
         '''
 
         if self.ndim == 0:
@@ -284,7 +311,7 @@ class lparray(np.ndarray):
             categ,
             lb=None,
             ub=None,
-            bigM=10000,
+            bigM=1000,
             axis: ty.Union[None, int, ty.Tuple[int, ...]] = None,
     ):
 
@@ -339,6 +366,8 @@ class lparray(np.ndarray):
         elif which == 'min':
             (z_br <= self).constrain(prob, f'{mmname}_ub')
             (z_br >= self - bigM * (1 - w)).constrain(prob, f'{mmname}_lb')
+        else:
+            assert 0
 
         return z
 
