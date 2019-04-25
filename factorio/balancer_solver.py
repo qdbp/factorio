@@ -10,18 +10,11 @@ import networkx as nx
 import numpy as np
 import pulp as pp
 from networkx.drawing.nx_agraph import to_agraph
+from scipy.linalg import toeplitz
 
-from .solver_core import (
-    IllSpecified,
-    Infeasible,
-    dicts_to_ndarray,
-    get_solver,
-    in_sol_dir,
-    lparray,
-    ndarray_to_dicts,
-    number,
-    numprod,
-)
+from pulp_lparray import lparray, number
+
+from .solver_core import IllSpecified, Infeasible, get_solver, in_sol_dir
 
 SOL_SUBDIR = "./balancers/"
 
@@ -232,47 +225,23 @@ def solve_balancers(
     if not exact_counts:
         (S.sum() >= min_spls).constrain(prob, "MinSplitters")
 
-    # 0.1: SPLITTER SEPARATION THEOREMS
-    # We adopt the following formalism:
-    # Define I0 = {s | s is ipinned}, O0 = {s | s is opinned}
-    # I1 = {s | exists u in I0: C[u, s] == 1 and s not in I0}
-    # O1 = {s | exists w in O0: C[s, w] == 1 and s not in O0}
-    # We have trivially that I0, I1, ... are pairwise disjoint, same for On
-    # for N > 2, we have I0 disjoint O0, hence we have separate pinsets
-    #
+    # 0.1: SPLITTER SEPARATION THEOREM
     # Theorem 3.
-    # If N > 4, an input splitter cannot be connected to an output splitter.
+    # If N > 2 ** k, a chain like the following cannot exist:
+    # i -> s1 -> ... -> sk -> o
     # Proof.
-    # The fraction of item i on output o under a subgraph like
-    # i -> s0 -> s1 -> o is at least 1 / 4. Balancing requires that it
-    # be 1 / N < 1 / 4.  Therefore such a subgraph cannot exist.
-    #
-    # Therefore, N > 4 => Im disjoint On if m + n < 2. Thus any destination
-    # nodes of I0 (by definition in I1) cannot flow into the output, since any
-    # nodes flowing into the output are by definition in O0.
-    #
-    # 0.1.0 N > 4 SEPARATION THEOREM
-    if N > 4:
-        print("Solver/Info: invoking N > 4 separation theorem.")
-        (Ro + Ri >= 2).constrain(prob, "Sep4")
+    # The fraction of item i on output o must be 1 / N < 1 / (2**k).
+    # But since each splitter at most halves the output, the outflow of sk
+    # of type i must be at least 1 / 2**k. Therefore such a subgraph cannot
+    # exist.
+    # 0.1.0 SEPARATION THEOREM
+    (Ro + Ri >= H - 1).constrain(prob, "SepTheorem")
 
-    # Extension 3.1.
-    # If N > 8, a chain i -> s0 -> s1 -> s2 -> o cannot exist.
-    #                i:o     0:2   1:1   2:0
-    # Proof. As above.
-    if N > 8:
-        print("Solver/Info: invoking N > 8 separation theorem.")
-        (Ro + Ri >= 3).constrain(prob, "Sep8")
-
-    # We can constrain the problem by forcing the input ranks to be ordered
-    # among splitters that are not opinned. NOTE I don't believe we can always
-    # force both iranks and oranks to be ordered...
-    # TODO both orank and irank ordering exclude known optimal solutions. Is
-    # there a way to salvage this?
+    # We can constrain the problem by forcing the output ranks to be ordered.
+    # NOTE I don't believe we can always force both iranks and oranks to be
+    # ordered simultaneously...
     # 0.2 ORANK ORDERING OF FREE SPLITTERS
     (Ro[nsi0 + 1 :] <= Ro[nsi0:-1]).constrain(prob, "RankOrdering")
-
-    assert min_spls >= nsotot + nsitot
 
     # 0.3: RESPECT PINS
     if not exact_counts:
@@ -280,7 +249,7 @@ def solve_balancers(
         if nsotot > 0:
             (S[-nsotot:] == 1).constrain(prob, "OutPins")
 
-        # 0.4 UNPINNED SPLITTERS ARE ORDERED
+        # 0.4 UNPINNED SPLITTERS ARE ACTIVATED IN ORDER
         Sl = S[nsitot : max_spls - nsotot - 1]
         Su = S[nsitot + 1 : max_spls - nsotot]
         (Sl >= Su).constrain(prob, "UnpinnedSplitterOrder")
@@ -357,18 +326,14 @@ def solve_balancers(
     # forall s,o,t: 2 * Fo[s, o, t] <= inflow[s, t]
     (2 * Fo <= inflows[:, None, :]).constrain(prob, "SplittingO")
 
-    # 1.5 FLOW THINNING RESTRICTIONS
+    # 1.6 FLOW THINNING
     # ∀ t, w:
-    # Ro[u] <= 1 => Fs[u, w, t] <= (2 / N)
-    # Ro[u] <= 2 => Fs[u, w, t] <= (4 / N)
     # Ro[u] <= k => Fs[u, w, t] <= (2**k / N)
     # By the same argument as Theorem 3.
-    #
-    # 1.5.0 Ro <= 1 FLOW THINNING
     def impose_flow_thinning(rank):
         # xp >= 1 iff Ro <= rank
         limit = 2 ** rank
-        xp, _ = (-Ro + rank + 1).abs(
+        xp, _ = (-Ro + rank + 1).abs_decompose(
             prob, f"FlowThin{rank}Abs", 0, MAX_RANK, pp.LpInteger
         )
         ro_le_rank = xp.logical_clip(prob, f"FlowThin{rank}Lclip")
@@ -377,65 +342,36 @@ def solve_balancers(
             <= limit + (N - limit) * (1 - ro_le_rank)[:, None, None]
         ).constrain(prob, f"FlowThin{rank}")
 
-    if N > 2:
-        impose_flow_thinning(1)
-    # 1.5.1 Ro <= 2 FLOW THINNING
-    if N > 4:
-        impose_flow_thinning(2)
-    # 1.5.2 Ro <= FLOW THINNING
-    if N > 8:
-        impose_flow_thinning(3)
+    for orank in range(1, H):
+        impose_flow_thinning(orank)
 
-    # TODO EXPERIMENTAL
-    # Flow covering theorems:
-    # ∀ u: |{t | F[u, v, t] > 0}| <= 2 ** (Ri[u] + 1)
-    #
     # 1.6 FLOW COVERING THEOREMS
     # 1.6.0 Ri <= 0 FLOW COVERING
-    def impose_flow_covering(rank):
-        limit = 2 ** (rank + 1)
-        cover = lparray.create_anon(
-            f"FlowCover{rank}Aux", (max_spls, M), 0, 1, pp.LpBinary
-        )
-        (cover.sum(axis=1) <= limit).constrain(prob, f"FlowCover{rank}Limit")
-        # xp >= 1 => Ri <= rank
-        xp, _ = (-Ri + rank + 1).abs(
-            prob, f"FlowCover{rank}Abs", 0, MAX_RANK, pp.LpInteger
-        )
-        ri_le_rank = xp.logical_clip(prob, f"FlowCover{rank}Lclip")
-        (
-            Fs[:, :, :] <= cover[:, None, :] + (1 - ri_le_rank[:, None, None])
-        ).constrain(prob, f"FlowCover{rank}")
+    # FsMax = Fs.lp_real_max(prob, "FsMax", axis=(1, 2), lb=0.0, ub=1.0, bigM=1)
+
+    # TODO debug this
+    # def impose_flow_covering(rank):
+    #     minmax = 2 ** (rank + 1)
+    #     # xp >= 1 <=> Ri <= rank
+    #     xp, _ = (-Ri + rank + 1).abs_decompose(
+    #         prob, f"FsMaxRankMask{rank}Abs", 0, MAX_RANK, pp.LpInteger
+    #     )
+    #     ri_le_rank = xp.logical_clip(prob, f"FsMaxRankMask{rank}Lclip")
+    #     (minmax * FsMax >= ri_le_rank).constrain(prob, f"FsMax{rank}")
 
     # if M > 2:
     #     impose_flow_covering(0)
     # if M > 4:
-    #     impose_flow_covering(1)
+    # impose_flow_covering(1)
     # if M > 8:
-    #     impose_flow_covering(2)
+    # impose_flow_covering(2)
 
     # ## OBJECTIVE
-    # #
-    objective = pp.LpAffineExpression()
-
     # penalize number of intermediate splitters
     if not exact_counts:
-        objective += 1000 * S.sumit()
-
-    # search-biasing objective terms
-    # XXX ideally these will be subsumed into the layout problem
-    for si in number(Splitters):
-        # penalize jumps back
-        for sj in range(ix):
-            objective += (si - sj) * Conn[si, sj]
-        # penalize jumps forward
-        for sj in range(ix + 1, max_spls):
-            objective += (sj - si) * Conn[si, sj]
-        # penalize irank disorder
-        # TODO check if this helps with convergence time
-        # objective += Ri[:-1] - Ri[1:]
-
-    prob += objective
+        prob += S.sumit()
+    # NOTE it was found that various "search biasing" objectives seriously slow
+    # down the time to a splitter-optimal solution
 
     # ## SOLVING
     # #

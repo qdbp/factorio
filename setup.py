@@ -13,6 +13,7 @@ setup(
         "matplotlib",
         "pygraphviz",
         "gurobipy",
+        "typing_extensions",
     ],
     extras_require={"test": ["pytest"]},
     name="factorio",
