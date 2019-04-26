@@ -297,6 +297,11 @@ def solve_balancers(
     # |Gl| == 0.
     # NOTE empirically, it appears the presolversolver infers this from
     # the output rank ordering condition
+    # XXX HEURISTIC
+    # ((Conn * np.tril(np.ones((max_spls, max_spls)), -1)).sum() <= 3).constrain(
+    #     prob, "MAXBACKEDGES HEURISTIC"
+    # )
+    # (Ro <= H - 1).constrain(prob, "MAXORANK HEURISTIC")
 
     # # CHAPTER 1: FLOW CONSTRAINTS
     # 1.0 RESPECT FLOW CAP
@@ -368,10 +373,18 @@ def solve_balancers(
 
     # ## OBJECTIVE
     # penalize number of intermediate splitters
+    objective = pp.LpAffineExpression()
     if not exact_counts:
-        prob += S.sumit()
+        pass
+        # objective += S.sumit()
     # NOTE it was found that various "search biasing" objectives seriously slow
     # down the time to a splitter-optimal solution
+    # XXX this may not be the case with exact_counts
+    # else:
+    # objective += (Conn * np.tril(toeplitz(np.arange(max_spls)))).sumit()
+    # objective += (Conn * toeplitz(np.arange(max_spls))).sumit()
+    # objective += (Conn * toeplitz(np.arange(max_spls))).sumit()
+    prob += objective
 
     # ## SOLVING
     # #
